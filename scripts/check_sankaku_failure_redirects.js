@@ -33,7 +33,7 @@
     results.push({failure_id: job.id, kind: job.kind, site_name: job.site_name,
       post_id: job.post_id, post_url: job.post_url, result: status, final_url: finalUrl, error});
     // Keep requests to roughly one every 10 seconds, with a 60-second pause every 10 checks.
-    if (i < failures.length - 1) await wait((i + 1) % 10 === 0 ? 60000 : 10000);
+    if (i < failures.length - 1) await wait((i + 1) % 50 === 0 ? 60000 : 5000);
   }
 
   const cols = ['failure_id','kind','site_name','post_id','post_url','result','final_url','error'];
