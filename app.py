@@ -877,18 +877,21 @@ def clear_completed():
 def failures():
     page = positive(request.args.get('page', 1), 1000000)
     size = positive(request.args.get('per_page', 20), 100)
+    export_all = request.args.get('all') == '1'
     with database() as db:
         total = db.execute("SELECT count(*) FROM jobs j JOIN searches s ON s.id=j.search_id WHERE j.status='error' AND s.deleted_at IS NULL").fetchone()[0]
         pages = max(1, (total + size - 1) // size)
         page = min(page, pages)
-        rows = db.execute("""SELECT j.id,j.kind,j.search_id,j.message,j.created,s.source_id,s.tags,
+        query = """SELECT j.id,j.kind,j.search_id,j.message,j.created,s.source_id,s.tags,
           CASE WHEN j.kind='download' THEN (SELECT remote_id FROM posts WHERE id=j.download_post_id) END AS post_id
           FROM jobs j JOIN searches s ON s.id=j.search_id WHERE j.status='error' AND s.deleted_at IS NULL
-          ORDER BY j.id DESC LIMIT ? OFFSET ?""", (size, (page-1)*size)).fetchall()
+          ORDER BY j.id DESC"""
+        rows = db.execute(query if export_all else query + ' LIMIT ? OFFSET ?', () if export_all else (size, (page-1)*size)).fetchall()
         result = []
         for row in rows:
             client = get_source(db, row['source_id'])
-            result.append(dict(row, site_name=client.name, post_url=client.post_url(row['post_id']) if row['post_id'] else None))
+            result.append(dict(row, site_name=client.name, site_api=client.api,
+                               post_url=client.post_url(row['post_id']) if row['post_id'] else None))
     return jsonify(failures=result, total=total, page=page, total_pages=pages)
 
 
