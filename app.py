@@ -883,6 +883,7 @@ def failures():
         pages = max(1, (total + size - 1) // size)
         page = min(page, pages)
         query = """SELECT j.id,j.kind,j.search_id,j.message,j.created,s.source_id,s.tags,
+          j.download_post_id AS post_record_id,
           CASE WHEN j.kind='download' THEN (SELECT remote_id FROM posts WHERE id=j.download_post_id) END AS post_id
           FROM jobs j JOIN searches s ON s.id=j.search_id WHERE j.status='error' AND s.deleted_at IS NULL
           ORDER BY j.id DESC"""
@@ -893,6 +894,30 @@ def failures():
             result.append(dict(row, site_name=client.name, site_api=client.api,
                                post_url=client.post_url(row['post_id']) if row['post_id'] else None))
     return jsonify(failures=result, total=total, page=page, total_pages=pages)
+
+
+@app.post('/api/posts/<int:record_id>/skip')
+def skip_post(record_id):
+    with database() as db:
+        post = db.execute('SELECT availability_status FROM posts WHERE id=?',(record_id,)).fetchone()
+        if not post:
+            abort(404)
+        already_skipped = post['availability_status'] in ('empty_redirect','skipped')
+        if not already_skipped:
+            db.execute("UPDATE posts SET availability_status='skipped' WHERE id=?",(record_id,))
+        linked = db.execute('SELECT search_id,count(*) AS total FROM matches WHERE post_id=? GROUP BY search_id',(record_id,)).fetchall()
+        db.execute('DELETE FROM result_order WHERE post_id=?',(record_id,))
+        db.execute('DELETE FROM matches WHERE post_id=?',(record_id,))
+        for row in linked:
+            db.raw_execute('UPDATE search_counts SET total=GREATEST(0,total-%s) WHERE search_id=%s',(row['total'],row['search_id']))
+        cleared = db.execute("""UPDATE jobs SET status='cleared',cancel=1,message='Post skipped by user'
+          WHERE kind='download' AND download_post_id=? AND status IN ('queued','error','stopped')""",(record_id,)).rowcount
+        stopping = db.execute("""UPDATE jobs SET cancel=1,message='Post skipped by user; stopping download'
+          WHERE kind='download' AND download_post_id=? AND status='running'""",(record_id,)).rowcount
+    WAKE.set()
+    return jsonify(skipped=True,already_skipped=already_skipped,
+                   removed_results=sum(row['total'] for row in linked),cleared_downloads=cleared,
+                   stopping_downloads=stopping)
 
 
 @app.post('/api/jobs/restart-stopped')
@@ -1021,6 +1046,8 @@ def crawl(job, payload):
                     if cached:
                         post['tags'] = post_value(cached).get('tags') or ''
                 record_id = db.save_post(post,client.id,post.get('_sort') or (post['id'] if isinstance(post['id'],int) else time.time()))
+                if record_id is None:
+                    continue
                 db.execute('INSERT OR IGNORE INTO matches VALUES (?,?)', (search['id'], record_id))
             db.execute('UPDATE searches SET cursor=?,offset=offset+1,page_signature=?,complete=? WHERE id=?',
                        (next_cursor, signature, int(complete), search['id']))

@@ -114,17 +114,27 @@ class Relational:
 
     def save_post(self,post,source_id,sort_key=None,record_id=None):
         created=False
+        if record_id:
+            existing=self.raw_execute('SELECT availability_status FROM posts WHERE id=%s',(record_id,)).fetchone()
+        else:
+            existing=self.raw_execute('SELECT availability_status FROM posts WHERE source_id=%s AND remote_id=%s',(source_id,str(post['id']))).fetchone()
+        if existing and existing[0] in ('empty_redirect','skipped'):return None
         tags=post.get('tags') or ''
         if isinstance(tags,list):tags=' '.join(str(t) for t in tags)
         fields=('source_id','remote_id','sort_key','post_url','rating','score','favorite_count','title','description','tags_text','source_text','metadata_note','remote_created_at','remote_updated_at','availability_status')
         vals=(source_id,str(post['id']),sort_key if sort_key is not None else post.get('_sort') or 0,post.get('post_url'),post.get('rating'),post.get('score'),post.get('fav_count',post.get('favorites',post.get('faves'))),post.get('title',post.get('caption')),post.get('description'),tags,post.get('source'),post.get('metadata_note'),utc(post.get('created_at',post.get('datetime'))),utc(post.get('updated_at')),'deleted' if post.get('is_deleted') else 'available')
         columns=','.join(fields);marks=','.join(['%s']*len(fields))
         if record_id:
-            self.raw_execute('UPDATE posts SET '+','.join(k+'=%s' for k in fields)+',last_seen_at=UTC_TIMESTAMP(6) WHERE id=%s',(*vals,record_id))
+            setters=','.join(k+("=IF(availability_status IN ('empty_redirect','skipped'),availability_status,%s)" if k=='availability_status' else '=%s') for k in fields)
+            self.raw_execute('UPDATE posts SET '+setters+',last_seen_at=UTC_TIMESTAMP(6) WHERE id=%s',(*vals,record_id))
+            existing=self.raw_execute('SELECT availability_status FROM posts WHERE id=%s',(record_id,)).fetchone()
+            if existing and existing[0] in ('empty_redirect','skipped'):return None
         else:
-            cur=self.raw_execute(f'INSERT INTO posts({columns}) VALUES({marks}) ON DUPLICATE KEY UPDATE id=LAST_INSERT_ID(id),'+','.join(k+'=VALUES('+k+')' for k in fields[2:])+',last_seen_at=UTC_TIMESTAMP(6)',vals)
+            cur=self.raw_execute(f'INSERT INTO posts({columns}) VALUES({marks}) ON DUPLICATE KEY UPDATE id=LAST_INSERT_ID(id),'+','.join(k+'=VALUES('+k+')' for k in fields[2:] if k!='availability_status')+",availability_status=IF(posts.availability_status IN ('empty_redirect','skipped'),posts.availability_status,VALUES(availability_status)),last_seen_at=UTC_TIMESTAMP(6)",vals)
             record_id=cur.lastrowid
             created=cur.rowcount==1
+            existing=self.raw_execute('SELECT availability_status FROM posts WHERE id=%s',(record_id,)).fetchone()
+            if existing and existing[0] in ('empty_redirect','skipped'):return None
         for role,key in [('original','file_url'),('preview','preview_url'),('sample','sample_url')]:
             prefix='' if role=='original' else role+'_'
             duration=post.get('duration') or post.get('video_duration')
