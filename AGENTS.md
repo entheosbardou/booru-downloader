@@ -11,6 +11,7 @@
 - The production stack is at `/volume1/docker/portainer/compose/226/docker-compose.yml`. The repository's `compose.yaml` builds a standalone image, but has not replaced that stack. Never run both worker-bearing containers against the same `booru` database at once.
 - Keep MySQL passwords, CA certificates, site cookies, API keys, downloaded files, and the credential directory outside Git and Docker build context. Do not print secret values in commands, logs, tests, or responses. Existing profile records refer to files in the credential mount.
 - Preserve the host NAS root `/mnt/nas-data/wallpapers` mounted as `/downloads`; stored file paths are relative to that root.
+- When source is updated, update the files in the folder containing this AGENTS.md file.
 
 ## Data rules
 
