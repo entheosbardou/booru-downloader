@@ -1,0 +1,16 @@
+.git
+.env
+.env.*
+!.env.example
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+secrets/
+credentials/
+downloads/
+data/
+*.sql
+*.sql.gz
+*.tar.gz

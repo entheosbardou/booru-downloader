@@ -1,0 +1,47 @@
+services:
+  booru-downloader:
+    build: .
+    image: booru-downloader:local
+    restart: unless-stopped
+    init: true
+    ports:
+      - "${WEB_PORT:-9190}:8080"
+    environment:
+      DATA_DIR: /data
+      DOWNLOAD_ROOT: /downloads
+      BOORU_CREDENTIAL_DIR: /run/booru-credentials
+      MYSQL_HOST: ${MYSQL_HOST:?Set MYSQL_HOST in .env}
+      MYSQL_PORT: ${MYSQL_PORT:-3306}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-booru}
+      MYSQL_USER: ${MYSQL_USER:-booru_app}
+      MYSQL_PASSWORD_FILE: /run/secrets/booru/mysql-password
+      MYSQL_SSL_CA: /run/secrets/booru/mysql-ca.pem
+      TZ: ${TZ:-America/Denver}
+    volumes:
+      - app-data:/data
+      - type: bind
+        source: ${DOWNLOADS_HOST_PATH:?Set DOWNLOADS_HOST_PATH in .env}
+        target: /downloads
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${MYSQL_SECRETS_HOST_PATH:?Set MYSQL_SECRETS_HOST_PATH in .env}
+        target: /run/secrets/booru
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${BOORU_CREDENTIALS_HOST_PATH:?Set BOORU_CREDENTIALS_HOST_PATH in .env}
+        target: /run/booru-credentials
+        bind:
+          create_host_path: false
+    stop_grace_period: 60s
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+
+volumes:
+  app-data:
+    name: ${DATA_VOLUME_NAME:-booru-downloader-data}

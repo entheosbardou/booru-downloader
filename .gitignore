@@ -1,0 +1,12 @@
+.env
+*.py[cod]
+__pycache__/
+.pytest_cache/
+.venv/
+venv/
+secrets/
+credentials/
+downloads/
+data/
+*.sql.gz
+*.tar.gz
