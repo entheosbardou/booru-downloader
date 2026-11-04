@@ -14,11 +14,12 @@
   const failures = data.filter(job => job.site_api === 'sankaku' && job.post_url);
   console.log(`Checking ${failures.length} Sankaku failure post URLs…`);
   const results = [];
+  const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
   for (const [i, job] of failures.entries()) {
     let status = '', finalUrl = '', error = '';
     try {
       const response = await fetch(job.post_url, {
-        method: 'GET', redirect: 'follow', credentials: 'omit', referrerPolicy: 'no-referrer'
+        method: 'GET', redirect: 'follow', credentials: 'include', referrerPolicy: 'no-referrer'
       });
       finalUrl = response.url;
       status = new URL(finalUrl).pathname.toLowerCase().includes('en/posts/show_empty')
@@ -31,7 +32,8 @@
     }
     results.push({failure_id: job.id, kind: job.kind, site_name: job.site_name,
       post_id: job.post_id, post_url: job.post_url, result: status, final_url: finalUrl, error});
-    await new Promise(resolve => setTimeout(resolve, 300));
+    // Keep requests to roughly one every 10 seconds, with a 60-second pause every 10 checks.
+    if (i < failures.length - 1) await wait((i + 1) % 10 === 0 ? 60000 : 10000);
   }
 
   const cols = ['failure_id','kind','site_name','post_id','post_url','result','final_url','error'];
