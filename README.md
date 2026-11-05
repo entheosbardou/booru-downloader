@@ -23,10 +23,10 @@ The application stores searches, posts, jobs, and file records in MySQL. It stor
 The web app serves only thumbnails already cached in `/downloads/thumbnails`; it does not generate them during page views. New downloads generate their thumbnails after the file is saved. To prepare thumbnails for older saved files, run the one-time command in the deployed application container:
 
 ```sh
-docker exec <container-name> python backfill_thumbnails.py --delay 1
+docker exec <container-name> python backfill_thumbnails.py --workers 4
 ```
 
-The command processes one saved post at a time, waits one second after each new thumbnail, and skips thumbnails already cached. It does not run automatically on startup. Re-running it resumes by skipping cached thumbnails. For a small trial, add `--limit 20`.
+The command generates up to four thumbnails in parallel by default, with no artificial delay, and skips thumbnails already cached. Change `--workers` to fit available CPU and memory. It does not run automatically on startup. Re-running it resumes by skipping cached thumbnails. For a small trial, add `--limit 20`.
 4. Stop the existing container or stack so port 9190 is available. Keep its MySQL database, credentials directory, downloads mount, and `/data` volume.
 5. From this repository on the Docker host, run:
 

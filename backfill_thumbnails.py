@@ -1,9 +1,12 @@
 """Run manually once to prepare cached previews for existing downloads."""
 import argparse
-import time
+import os
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from mysql_store import connect
+import thumbnail_cache
 from thumbnail_cache import generate, valid_original
 
 
@@ -37,39 +40,43 @@ def saved_paths(after_post_id, batch_size):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--delay', type=float, default=1.0, help='Seconds between newly generated thumbnails (default: 1)')
+    parser.add_argument('--workers', type=int, default=max(1, int(os.environ.get('THUMBNAIL_WORKERS', '4'))), help='Parallel thumbnail jobs (default: 4)')
     parser.add_argument('--limit', type=int, default=0, help='Stop after this many posts; 0 means all')
     args = parser.parse_args()
-    if args.delay < 0 or args.limit < 0:
-        parser.error('delay and limit must be nonnegative')
+    if args.workers < 1 or args.limit < 0:
+        parser.error('workers must be positive and limit must be nonnegative')
+    thumbnail_cache.GENERATION_SLOTS = threading.BoundedSemaphore(args.workers)
     cursor = scanned = created = cached = skipped = 0
-    while True:
-        rows = saved_paths(cursor, 250)
-        if not rows:
-            break
-        grouped = {}
-        for post_id, name in rows:
-            grouped.setdefault(post_id, []).append(name)
-        for post_id, names in grouped.items():
-            cursor = post_id
-            scanned += 1
-            path = next((Path(name) for name in names if valid_original(Path(name))), None)
-            if path is None:
-                skipped += 1
-                continue
-            result, made = generate(path)
-            if result is None:
-                skipped += 1
-            elif made:
-                created += 1
-                time.sleep(args.delay)
-            else:
-                cached += 1
-            if scanned % 100 == 0:
+    with ThreadPoolExecutor(max_workers=args.workers) as pool:
+        while True:
+            rows = saved_paths(cursor, 250)
+            if not rows:
+                break
+            grouped = {}
+            for post_id, name in rows:
+                grouped.setdefault(post_id, []).append(name)
+            candidates = []
+            for post_id, names in grouped.items():
+                cursor = post_id
+                scanned += 1
+                path = next((Path(name) for name in names if valid_original(Path(name))), None)
+                if path is None:
+                    skipped += 1
+                else:
+                    candidates.append(path)
+                if args.limit and scanned >= args.limit:
+                    break
+            for result, made in pool.map(generate, candidates):
+                if result is None:
+                    skipped += 1
+                elif made:
+                    created += 1
+                else:
+                    cached += 1
+            if scanned % 100 == 0 or args.limit and scanned >= args.limit:
                 print(f'scanned={scanned} created={created} cached={cached} skipped={skipped}', flush=True)
             if args.limit and scanned >= args.limit:
-                print(f'finished scanned={scanned} created={created} cached={cached} skipped={skipped}', flush=True)
-                return
+                break
     print(f'finished scanned={scanned} created={created} cached={cached} skipped={skipped}', flush=True)
 
 

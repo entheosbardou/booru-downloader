@@ -10,7 +10,7 @@ ROOT = Path(os.environ.get('DOWNLOAD_ROOT', '/downloads')).resolve()
 CACHE = ROOT / 'thumbnails'
 SIZE = (480, 480)
 SUPPORTED = {'.jpg', '.jpeg', '.png', '.gif', '.webp', '.avif', '.bmp', '.tif', '.tiff'}
-GENERATION_LOCK = threading.Lock()
+GENERATION_SLOTS = threading.BoundedSemaphore(max(1, int(os.environ.get('THUMBNAIL_WORKERS', '4'))))
 
 
 def valid_original(path):
@@ -35,7 +35,7 @@ def generate(path):
     cached = cached_path(path)
     if cached.is_file():
         return cached, False
-    with GENERATION_LOCK:
+    with GENERATION_SLOTS:
         if cached.is_file():
             return cached, False
         CACHE.mkdir(parents=True, exist_ok=True)
