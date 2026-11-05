@@ -6,6 +6,7 @@ import threading
 from pathlib import Path
 
 from PIL import Image, ImageOps, UnidentifiedImageError
+from imageio_ffmpeg import get_ffmpeg_exe
 
 ROOT = Path(os.environ.get('DOWNLOAD_ROOT', '/downloads')).resolve()
 BOORU_ROOT = ROOT / 'booru'
@@ -47,7 +48,7 @@ def generate(path):
         try:
             if Path(path).suffix.lower() in VIDEO:
                 result = subprocess.run([
-                    'ffmpeg', '-nostdin', '-hide_banner', '-loglevel', 'error',
+                    get_ffmpeg_exe(), '-nostdin', '-hide_banner', '-loglevel', 'error',
                     '-threads', '1', '-i', str(path), '-map', '0:v:0',
                     '-frames:v', '1', '-vf', 'scale=480:480:force_original_aspect_ratio=decrease',
                     '-q:v', '4', '-f', 'image2', '-vcodec', 'mjpeg', '-y', str(temporary),
