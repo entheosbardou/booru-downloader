@@ -693,7 +693,18 @@ def posts(sid=None, gid=None):
         slots = ','.join('?' for _ in ids)
         where = f"m.search_id IN ({slots})"
         params = list(ids)
-        if term:
+        lookup_job=None
+        remote_match=bool(term and re.fullmatch(r'[A-Za-z0-9_-]{3,128}',term))
+        if term and remote_match:
+            filtered_sql='''SELECT ro.* FROM result_order ro JOIN posts p ON p.id=ro.post_id
+              WHERE ro.search_id IN ('''+slots+''') AND p.remote_id=?'''
+            filtered_params=[*ids,term]
+            if re.fullmatch(r'[0-9]{1,19}',term):
+                lookup_job=db.execute("""SELECT j.id,j.kind,j.status,j.message,j.created,j.search_id,j.download_post_id,
+                    s.tags,src.name AS site_name,p.remote_id,p.post_url FROM jobs j
+                    JOIN searches s ON s.id=j.search_id JOIN sources src ON src.id=s.source_id
+                    LEFT JOIN posts p ON p.id=j.download_post_id WHERE j.id=? AND j.kind='download'""",(int(term),)).fetchone()
+        elif term:
             filtered_sql, filtered_params = tag_index.filter_query(db,ids,term)
             total = db.execute('SELECT count(*) FROM ('+filtered_sql+') AS filtered',filtered_params).fetchone()[0]
         else:
@@ -730,7 +741,8 @@ def posts(sid=None, gid=None):
             result.append(dict(post,record_id=row['record_id'],search_id=row['search_id'],source_id=client.id,site_name=client.name,
                                post_url=client.post_url(post['id']),downloaded=bool(row['downloaded']),queued=bool(row['queued'])))
         index_status = tag_index.status(db)
-    return jsonify(tag_index=index_status, posts=result,page=page,per_page=per_page,total=total,total_pages=total_pages,
+    job_value=dict(lookup_job) if lookup_job else None
+    return jsonify(tag_index=index_status, posts=result,page=page,per_page=per_page,total=total,total_pages=total_pages,job=job_value,
                    page_length=min(per_page,max(0,total-(page-1)*per_page)),
                    more_on_page=chunk_offset+len(result)<min(per_page,max(0,total-(page-1)*per_page)))
 
