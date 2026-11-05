@@ -15,7 +15,6 @@ from contextlib import contextmanager
 from pathlib import Path
 from urllib.parse import urlparse, parse_qs
 from urllib.request import HTTPRedirectHandler, Request, build_opener
-from PIL import Image, ImageOps, UnidentifiedImageError
 
 from flask import Flask, Response, abort, jsonify, request, send_from_directory, send_file
 from crawler import FIELDS
@@ -27,6 +26,7 @@ import tag_index
 import purge_search
 from relational import post_value
 from library_groups import query_key, register_collection, shared_folder, migrate_library_groups
+from thumbnail_cache import cached_path, generate as generate_thumbnail
 
 MYSQL_ENABLED = bool(os.environ.get('MYSQL_HOST'))
 DATA = Path(os.environ.get('DATA_DIR', '/data'))
@@ -45,7 +45,6 @@ FILE_LOCKS = weakref.WeakValueDictionary()
 PROGRESS_GUARD = threading.Lock()
 TRANSFER_PROGRESS = {}
 PREVIEW_SLOTS = threading.BoundedSemaphore(2)
-THUMBNAIL_DIR = ROOT / 'thumbnails'
 PURGE_DIR = DATA / 'purge-queue'
 
 
@@ -1153,31 +1152,9 @@ def local_thumbnail(record_id):
     path = saved_file(record_id)
     if path is None:
         abort(404)
-    stat = path.stat()
-    identity = f'{path}:{stat.st_size}:{stat.st_mtime_ns}'
-    key = hashlib.sha256(identity.encode('utf-8')).hexdigest()
-    cached = THUMBNAIL_DIR / f'{key}.jpg'
+    cached = cached_path(path)
     if not cached.is_file():
-        with file_lock(cached):
-            if not cached.is_file():
-                THUMBNAIL_DIR.mkdir(parents=True, exist_ok=True)
-                temporary = THUMBNAIL_DIR / f'{key}.{threading.get_ident()}.tmp'
-                try:
-                    with Image.open(path) as image:
-                        image = ImageOps.exif_transpose(image)
-                        image.thumbnail((480, 480), Image.Resampling.LANCZOS)
-                        if image.mode != 'RGB':
-                            background = Image.new('RGB', image.size, 'white')
-                            if 'A' in image.getbands():
-                                background.paste(image, mask=image.getchannel('A'))
-                            else:
-                                background.paste(image)
-                            image = background
-                        image.save(temporary, format='JPEG', quality=82, optimize=True)
-                    os.replace(temporary, cached)
-                except (OSError, ValueError, UnidentifiedImageError):
-                    temporary.unlink(missing_ok=True)
-                    abort(404)
+        abort(404)
     response = send_file(cached, mimetype='image/jpeg', conditional=True)
     response.headers['Cache-Control'] = 'private, max-age=300'
     response.headers['X-Content-Type-Options'] = 'nosniff'
@@ -1205,6 +1182,10 @@ def download(job, payload):
                 raise ValueError('Post and search do not belong to the same site.')
         path=saved_file(payload['id'])
         if path is not None:
+            try:
+                generate_thumbnail(path)
+            except OSError as exc:
+                app.logger.warning('Could not generate thumbnail for saved post %s: %s', payload['id'], exc)
             with database() as db:
                 db.execute("UPDATE jobs SET status='done',progress=1,message=? WHERE id=?",
                            ('Linked to saved file: '+path.name,job['id']))
@@ -1334,6 +1315,10 @@ def transfer_file(job, payload, post, client, target, algorithm, expected, delay
             db.raw_execute('UPDATE source_runtime SET backoff_until=NULL,consecutive_failures=0 WHERE source_id=%s AND backoff_until<=UTC_TIMESTAMP(6)',(client.id,))
         db.execute("UPDATE jobs SET status='done',progress=1,message=? WHERE id=?",(f'Saved {target.name}',job['id']))
     clear_transfer_progress(job['id'])
+    try:
+        generate_thumbnail(target)
+    except OSError as exc:
+        app.logger.warning('Could not generate thumbnail for post %s: %s', payload['id'], exc)
 
 
 def claim_job(kind):

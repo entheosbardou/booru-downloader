@@ -17,6 +17,16 @@ The application stores searches, posts, jobs, and file records in MySQL. It stor
 1. Copy `.env.example` to `.env` on the Docker host and set each host path. `MYSQL_HOST` must be the MySQL server's hostname.
 2. Point `BOORU_CREDENTIALS_HOST_PATH` at the **existing** saved-credentials directory if retaining current site profiles. Their database records refer to files in that directory. The live deployment currently mounts `/opt/yandere-web/backups/relational-20261028_185449/credentials` at `/run/booru-credentials`; copying that directory to a new host path also works if permissions are preserved.
 3. To reuse the current `/data` volume, set `DATA_VOLUME_NAME=yandere-web_yandere-data`. Set `DOWNLOADS_HOST_PATH=/mnt/nas-data/wallpapers` to retain the current `/downloads` layout.
+
+### Existing thumbnail backfill
+
+The web app serves only thumbnails already cached in `/downloads/thumbnails`; it does not generate them during page views. New downloads generate their thumbnails after the file is saved. To prepare thumbnails for older saved files, run the one-time command in the deployed application container:
+
+```sh
+docker exec <container-name> python backfill_thumbnails.py --delay 1
+```
+
+The command processes one saved post at a time, waits one second after each new thumbnail, and skips thumbnails already cached. It does not run automatically on startup. Re-running it resumes by skipping cached thumbnails. For a small trial, add `--limit 20`.
 4. Stop the existing container or stack so port 9190 is available. Keep its MySQL database, credentials directory, downloads mount, and `/data` volume.
 5. From this repository on the Docker host, run:
 
