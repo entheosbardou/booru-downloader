@@ -5,6 +5,7 @@ import threading
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
+from PIL import Image
 from mysql_store import connect
 import thumbnail_cache
 from thumbnail_cache import generate, valid_original
@@ -26,7 +27,8 @@ def saved_paths(after_post_id, batch_size):
                 return []
             placeholders = ','.join(['%s'] * len(ids))
             return db.raw_execute(f"""
-                SELECT m.post_id, CONCAT(TRIM(TRAILING '/' FROM r.configured_path),'/',l.relative_path) AS path
+                SELECT m.post_id, CONCAT(TRIM(TRAILING '/' FROM r.configured_path),'/',l.relative_path) AS path,
+                       m.width, m.height
                 FROM media_files mf
                 JOIN post_media m ON m.id=mf.media_id
                 JOIN file_locations l ON l.file_id=mf.file_id AND l.status='present'
@@ -53,16 +55,20 @@ def main():
             if not rows:
                 break
             grouped = {}
-            for post_id, name in rows:
-                grouped.setdefault(post_id, []).append(name)
+            for post_id, name, width, height in rows:
+                grouped.setdefault(post_id, []).append((name, width, height))
             candidates = []
-            for post_id, names in grouped.items():
+            for post_id, locations in grouped.items():
                 cursor = post_id
                 scanned += 1
-                path = next((Path(name) for name in names if valid_original(Path(name))), None)
-                if path is None:
+                selected = next(((Path(name), width, height) for name, width, height in locations if valid_original(Path(name))), None)
+                if selected is None:
                     skipped += 1
                 else:
+                    path, width, height = selected
+                    pixels = (width or 0) * (height or 0)
+                    if pixels > Image.MAX_IMAGE_PIXELS:
+                        print(f'large_image post={post_id} pixels={pixels} path={path}', flush=True)
                     candidates.append(path)
                 if args.limit and scanned >= args.limit:
                     break

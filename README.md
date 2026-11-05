@@ -27,6 +27,14 @@ docker exec <container-name> python backfill_thumbnails.py --workers 4
 ```
 
 The command generates up to four thumbnails in parallel by default, with no artificial delay, and skips thumbnails already cached. Change `--workers` to fit available CPU and memory. It does not run automatically on startup. Re-running it resumes by skipping cached thumbnails. For a small trial, add `--limit 20`.
+
+For a large-image warning, use the pixel count printed by Pillow to find the saved post and see whether its thumbnail exists:
+
+```sh
+docker exec <container-name> python thumbnail_lookup.py --pixels 90326016
+```
+
+You can also look up a post with `--post-id 1306690`. The lookup prints every recorded file location, whether that file is present, and whether its current thumbnail is cached. The backfill also prints the post ID and chosen file path before processing an image whose recorded dimensions exceed Pillow's warning threshold.
 4. Stop the existing container or stack so port 9190 is available. Keep its MySQL database, credentials directory, downloads mount, and `/data` volume.
 5. From this repository on the Docker host, run:
 
