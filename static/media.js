@@ -1,6 +1,6 @@
 // Preserve loaded images when only download/selection state changes.
 function visiblePostSignature(posts,previews){
-  return JSON.stringify([previews,posts.map(p=>[p.record_id,p.md5,p.checksum,p.width,p.height,p.rating,p.tags,p.metadata_note,p.site_name,p.post_url,!!p.preview_url])]);
+  return JSON.stringify([previews,posts.map(p=>[p.record_id,p.md5,p.checksum,p.width,p.height,p.rating,p.tags,p.metadata_note,p.site_name,p.post_url,!!p.preview_url,!!p.downloaded])]);
 }
 
 function refreshPostCardStates(grid,posts,selected,downloadPath){
