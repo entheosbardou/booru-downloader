@@ -689,12 +689,15 @@ def posts(sid=None, gid=None):
     expression,direction = orders[sort]
     with database() as db:
         searches = scoped_searches(db,sid,gid)
+        remote_match=bool(term and re.fullmatch(r'[A-Za-z0-9_-]{3,128}',term))
+        if remote_match:
+            searches=db.execute('''SELECT s.* FROM searches s JOIN collections c ON c.id=s.collection_id
+                WHERE s.deleted_at IS NULL AND c.deleted_at IS NULL ORDER BY s.id''').fetchall()
         ids = [row['id'] for row in searches]
         slots = ','.join('?' for _ in ids)
         where = f"m.search_id IN ({slots})"
         params = list(ids)
         lookup_job=None
-        remote_match=bool(term and re.fullmatch(r'[A-Za-z0-9_-]{3,128}',term))
         if term and remote_match:
             filtered_sql='''SELECT ro.* FROM result_order ro JOIN posts p ON p.id=ro.post_id
               WHERE ro.search_id IN ('''+slots+''') AND p.remote_id=?'''
