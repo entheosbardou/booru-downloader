@@ -735,6 +735,40 @@ def posts(sid=None, gid=None):
                    more_on_page=chunk_offset+len(result)<min(per_page,max(0,total-(page-1)*per_page)))
 
 
+@app.get('/api/saved-posts/lookup')
+def saved_post_lookup():
+    remote_id=request.args.get('remote_id','').strip()
+    job_text=request.args.get('job_id','').strip()
+    if not remote_id and not job_text:
+        raise ValueError('Enter a remote post ID or download job number.')
+    if len(remote_id)>128 or (job_text and (not job_text.isdigit() or len(job_text)>19)):
+        raise ValueError('Enter a valid remote post ID or download job number.')
+    with database() as db:
+        job=None
+        if job_text:
+            job=db.execute("""SELECT j.id,j.kind,j.status,j.message,j.created,j.search_id,j.download_post_id,
+                s.tags,s.source_id,src.name AS site_name,p.remote_id,p.post_url,p.id AS post_record_id
+                FROM jobs j JOIN searches s ON s.id=j.search_id JOIN sources src ON src.id=s.source_id
+                LEFT JOIN posts p ON p.id=j.download_post_id WHERE j.id=?""",(int(job_text),)).fetchone()
+        if remote_id:
+            rows=db.execute("""SELECT p.*,p.id AS record_id,s.id AS search_id,src.name AS site_name,src.id AS source_id,
+                src.url,src.post_path,
+                EXISTS(SELECT 1 FROM downloads d WHERE d.post_id=p.id) AS downloaded,
+                EXISTS(SELECT 1 FROM jobs j WHERE j.kind='download' AND j.status IN ('queued','running') AND j.download_post_id=p.id) AS queued
+                FROM posts p JOIN matches m ON m.post_id=p.id JOIN searches s ON s.id=m.search_id
+                JOIN sources src ON src.id=p.source_id JOIN collections c ON c.id=s.collection_id
+                WHERE p.remote_id=? AND s.deleted_at IS NULL AND c.deleted_at IS NULL
+                GROUP BY p.id ORDER BY p.first_seen_at DESC LIMIT 100""",(remote_id,)).fetchall()
+        else:
+            rows=[]
+        found=[]
+        for row in rows:
+            value=post_value(row);base=(row['url'] or '').rstrip('/');path=row['post_path'] or '/post/show/'
+            found.append(dict(value,record_id=row['record_id'],search_id=row['search_id'],source_id=row['source_id'],
+                site_name=row['site_name'],post_url=base+path+str(value['id']),downloaded=bool(row['downloaded']),queued=bool(row['queued'])))
+    return jsonify(posts=found,job=dict(job) if job else None,job_found=bool(job))
+
+
 @app.post('/api/collections/<int:gid>/posts/status')
 @app.post('/api/searches/<int:sid>/posts/status')
 def visible_post_status(sid=None,gid=None):
