@@ -707,14 +707,6 @@ def posts(sid=None, gid=None):
                     s.tags,src.name AS site_name,p.remote_id,p.post_url FROM jobs j
                     JOIN searches s ON s.id=j.search_id JOIN sources src ON src.id=s.source_id
                     LEFT JOIN posts p ON p.id=j.download_post_id WHERE j.id=? AND j.kind='download'""",(int(term),)).fetchone()
-                if lookup_job:
-                    filtered_sql='''SELECT ro.* FROM result_order ro JOIN posts p ON p.id=ro.post_id
-                      WHERE ro.search_id IN ('''+slots+''') AND p.remote_id=?
-                      UNION SELECT ro.* FROM result_order ro JOIN jobs j ON j.search_id=ro.search_id
-                        AND j.download_post_id=ro.post_id WHERE ro.search_id IN ('''+slots+''')
-                        AND j.id=? AND j.kind='download' '''
-                    filtered_params=[*ids,term,*ids,int(term)]
-            total=db.execute('SELECT count(*) FROM ('+filtered_sql+') AS filtered',filtered_params).fetchone()[0]
         elif term:
             filtered_sql, filtered_params = tag_index.filter_query(db,ids,term)
             total = db.execute('SELECT count(*) FROM ('+filtered_sql+') AS filtered',filtered_params).fetchone()[0]
