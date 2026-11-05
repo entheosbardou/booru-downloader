@@ -689,28 +689,41 @@ def posts(sid=None, gid=None):
     expression,direction = orders[sort]
     with database() as db:
         searches = scoped_searches(db,sid,gid)
-        remote_match=bool(term and re.fullmatch(r'[A-Za-z0-9_-]{3,128}',term))
-        if remote_match:
-            searches=db.execute('''SELECT s.* FROM searches s JOIN collections c ON c.id=s.collection_id
-                WHERE s.deleted_at IS NULL AND c.deleted_at IS NULL ORDER BY s.id''').fetchall()
         ids = [row['id'] for row in searches]
         slots = ','.join('?' for _ in ids)
         where = f"m.search_id IN ({slots})"
         params = list(ids)
         lookup_job=None
-        if term and remote_match:
-            filtered_sql='''SELECT ro.* FROM result_order ro JOIN posts p ON p.id=ro.post_id
-              WHERE ro.search_id IN ('''+slots+''') AND p.remote_id=?'''
-            filtered_params=[*ids,term]
+        remote_match=bool(term and re.fullmatch(r'[A-Za-z0-9_-]{3,128}',term))
+        id_terms=[]
+        if remote_match:
+            exact_count=db.execute('''SELECT count(*) FROM result_order ro JOIN posts p ON p.id=ro.post_id
+                WHERE ro.search_id IN ('''+slots+''') AND p.remote_id=?''',(*ids,term)).fetchone()[0]
+            if exact_count:
+                id_terms.append(('p.remote_id=?',[term]))
             if re.fullmatch(r'[0-9]{1,19}',term):
                 lookup_job=db.execute("""SELECT j.id,j.kind,j.status,j.message,j.created,j.search_id,j.download_post_id,
                     s.tags,src.name AS site_name,p.remote_id,p.post_url FROM jobs j
                     JOIN searches s ON s.id=j.search_id JOIN sources src ON src.id=s.source_id
-                    LEFT JOIN posts p ON p.id=j.download_post_id WHERE j.id=? AND j.kind='download'""",(int(term),)).fetchone()
-        elif term:
+                    LEFT JOIN posts p ON p.id=j.download_post_id
+                    WHERE j.id=? AND j.kind='download' AND j.search_id IN ("""+slots+")",(int(term),*ids)).fetchone()
+                if lookup_job and lookup_job['download_post_id']:
+                    job_post=db.execute('SELECT 1 FROM result_order WHERE search_id=? AND post_id=? LIMIT 1',
+                        (lookup_job['search_id'],lookup_job['download_post_id'])).fetchone()
+                    if job_post:
+                        id_terms.append(('j.id=?',[int(term)]))
+            if id_terms:
+                filtered_sql='''SELECT ro.* FROM result_order ro JOIN posts p ON p.id=ro.post_id
+                  LEFT JOIN jobs j ON j.search_id=ro.search_id AND j.download_post_id=ro.post_id
+                  WHERE ro.search_id IN ('''+slots+') AND ('+' OR '.join(condition for condition,_ in id_terms)+')'
+                filtered_params=[*ids,*[value for _,values in id_terms for value in values]]
+                total=db.execute('SELECT count(*) FROM ('+filtered_sql+') AS filtered',filtered_params).fetchone()[0]
+            else:
+                remote_match=False
+        if term and not remote_match:
             filtered_sql, filtered_params = tag_index.filter_query(db,ids,term)
             total = db.execute('SELECT count(*) FROM ('+filtered_sql+') AS filtered',filtered_params).fetchone()[0]
-        else:
+        elif not term:
             total = db.execute('SELECT COALESCE(sum(total),0) FROM search_counts WHERE search_id IN ('+slots+')',ids).fetchone()[0]
         total_pages = max(1, (total+per_page-1)//per_page)
         page = min(page,total_pages)
