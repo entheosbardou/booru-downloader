@@ -20,7 +20,7 @@ The application stores searches, posts, jobs, and file records in MySQL. It stor
 
 ### Existing thumbnail backfill
 
-The web app serves only thumbnails already cached in `/downloads/thumbnails`; it does not generate them during page views. New downloads generate their thumbnails after the file is saved. To prepare thumbnails for older saved files, run the one-time command in the deployed application container:
+The web app serves only thumbnails already cached in `/downloads/thumbnails`; it does not generate them during page views. Thumbnail generation reads originals only from `/downloads/booru/`. It supports image files, MP4, WebM, and SWF files with an embedded decodable video stream. SWFs without such a stream use the source preview. New downloads there generate their thumbnails after the file is saved. To prepare thumbnails for older saved files, run the one-time command in the deployed application container:
 
 ```sh
 docker exec <container-name> python backfill_thumbnails.py --workers 4
