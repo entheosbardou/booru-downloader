@@ -45,7 +45,7 @@ FILE_LOCKS = weakref.WeakValueDictionary()
 PROGRESS_GUARD = threading.Lock()
 TRANSFER_PROGRESS = {}
 PREVIEW_SLOTS = threading.BoundedSemaphore(2)
-THUMBNAIL_DIR = DATA / 'thumbnails'
+THUMBNAIL_DIR = ROOT / 'thumbnails'
 PURGE_DIR = DATA / 'purge-queue'
 
 

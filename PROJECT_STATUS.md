@@ -2,7 +2,7 @@
 
 ## Local thumbnail work (November 5, 2026)
 
-- Saved image posts use a locally generated, 480-pixel JPEG thumbnail stored in `/data/thumbnails`. The cache key includes the saved path, file size, and modification time. Posts without a saved image continue to use the source preview; unsupported local files fall back to it. This is a source change only and has not been deployed. Python compilation, JavaScript syntax checks, Compose configuration, a clean Docker build, and an isolated thumbnail route/cache check passed; no live post was tested.
+- Saved image posts use a locally generated, 480-pixel JPEG thumbnail. On November 5, the cache location was changed from `/data/thumbnails` to `/downloads/thumbnails`, which maps to the NAS download mount in the production stack. The NAS mount was verified as a CIFS mount from `nas.thelinclan.com`. The cache key includes the saved path, file size, and modification time. Posts without a saved image continue to use the source preview; unsupported local files fall back to it. The user deployed the earlier `/data/thumbnails` version and reported that thumbnail generation overloaded the Docker host's local disk. The new cache-location change is local source only and has not been deployed or tested on production. Python compilation, JavaScript syntax, Compose configuration, diff check, and a clean Docker build passed (local image `booru-downloader:nas-thumbnails`, `sha256:d2da3a6414231ccaf57f12aa1e640c474fb621738ff0b9214c1d4bc5e9528052`).
 - The thumbnail cache currently has no automatic cleanup of superseded files.
 
 Snapshot: November 4, 2026 (America/Denver). Live state can change; recheck before acting.
