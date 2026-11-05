@@ -1146,10 +1146,20 @@ def download_new_file(job, payload):
         raise ValueError('The post has an invalid file identifier.')
     target = folder / f"{remote}_{expected[:32] if expected else 'original'}.{ext}"
     with file_lock(target):
-        transfer_file(job, payload, post, client, target, algorithm, expected, delay)
+        try:
+            transfer_file(job, payload, post, client, target, algorithm, expected, delay)
+        except ValueError as exc:
+            if str(exc) != 'Downloaded file failed checksum/size verification.':
+                raise
+            # Keep unverifiable originals in a clearly marked area while
+            # preserving the collection's source and rating subdirectories.
+            error_folder = destination(str(collection / 'checksum error' / subdir / rating_folder), create=True)
+            error_target = error_folder / target.name
+            with file_lock(error_target):
+                transfer_file(job, payload, post, client, error_target, algorithm, expected, delay, verify=False)
 
 
-def transfer_file(job, payload, post, client, target, algorithm, expected, delay):
+def transfer_file(job, payload, post, client, target, algorithm, expected, delay, verify=True):
     check_stop(job['id'])
     if target.is_symlink():
         raise ValueError('Download target cannot be a symbolic link.')
@@ -1197,7 +1207,7 @@ def transfer_file(job, payload, post, client, target, algorithm, expected, delay
                         if now-last_progress >= 1:
                             report_transfer_progress(job['id'],f"{client.name} #{post['id']}: {size//1024:,} KB")
                             last_progress = now
-                if (expected and hasher.hexdigest() != expected) or (post.get('file_size') and size != post['file_size']) or (length and size != length) or size == 0:
+                if (verify and ((expected and hasher.hexdigest() != expected) or (post.get('file_size') and size != post['file_size']) or (length and size != length))) or size == 0:
                     raise ValueError('Downloaded file failed checksum/size verification.')
                 partial.replace(target)
                 break
