@@ -26,7 +26,7 @@ The web app serves only thumbnails already cached in `/downloads/thumbnails`; it
 docker exec <container-name> python backfill_thumbnails.py --workers 4
 ```
 
-The command generates up to four thumbnails in parallel by default, with no artificial delay, and skips thumbnails already cached. Change `--workers` to fit available CPU and memory. It does not run automatically on startup. Re-running it resumes by skipping cached thumbnails. For a small trial, add `--limit 20`.
+The command generates up to four thumbnails in parallel by default, with no artificial delay, and skips thumbnails already cached. Each uncached thumbnail runs in a short-lived process, so decoder memory is returned to the operating system after that file. Change `--workers` to fit available CPU and memory; process isolation does not prevent high peak memory use when multiple huge images run together. It does not run automatically on startup. Re-running it resumes by skipping cached thumbnails. For a small trial, add `--limit 20`.
 
 For a large-image warning, use the pixel count printed by Pillow to find the saved post and see whether its thumbnail exists:
 

@@ -26,7 +26,7 @@ import tag_index
 import purge_search
 from relational import post_value
 from library_groups import query_key, register_collection, shared_folder, migrate_library_groups
-from thumbnail_cache import cached_path, generate as generate_thumbnail, valid_original
+from thumbnail_cache import cached_path, generate_isolated as generate_thumbnail, valid_original
 
 MYSQL_ENABLED = bool(os.environ.get('MYSQL_HOST'))
 DATA = Path(os.environ.get('DATA_DIR', '/data'))

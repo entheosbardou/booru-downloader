@@ -1,7 +1,9 @@
 """Local, deterministic thumbnail cache shared by the web app and backfill."""
 import hashlib
+import json
 import os
 import subprocess
+import sys
 import threading
 from pathlib import Path
 
@@ -73,3 +75,33 @@ def generate(path):
         except (OSError, ValueError, UnidentifiedImageError, subprocess.TimeoutExpired):
             temporary.unlink(missing_ok=True)
             return None, False
+
+
+def generate_isolated(path):
+    """Generate in a fresh process so image decoder memory is released on exit."""
+    if not valid_original(path):
+        return None, False
+    cached = cached_path(path)
+    if cached.is_file():
+        return cached, False
+    with GENERATION_SLOTS:
+        if cached.is_file():
+            return cached, False
+        try:
+            result = subprocess.run(
+                [sys.executable, '-m', 'thumbnail_cache', str(path)],
+                capture_output=True, text=True, timeout=120, check=False,
+            )
+            if result.returncode != 0:
+                return None, False
+            outcome = json.loads(result.stdout)
+            if outcome['cached'] and cached.is_file():
+                return cached, bool(outcome['created'])
+        except (OSError, ValueError, KeyError, subprocess.TimeoutExpired):
+            pass
+        return None, False
+
+
+if __name__ == '__main__':
+    cached, created = generate(Path(sys.argv[1]))
+    print(json.dumps({'cached': bool(cached), 'created': created}))

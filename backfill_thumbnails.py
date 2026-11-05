@@ -8,7 +8,7 @@ from pathlib import Path
 from PIL import Image
 from mysql_store import connect
 import thumbnail_cache
-from thumbnail_cache import generate, valid_original
+from thumbnail_cache import generate_isolated, valid_original
 
 
 def saved_paths(after_post_id, batch_size):
@@ -72,9 +72,10 @@ def main():
                     candidates.append(path)
                 if args.limit and scanned >= args.limit:
                     break
-            for result, made in pool.map(generate, candidates):
+            for path, (result, made) in zip(candidates, pool.map(generate_isolated, candidates)):
                 if result is None:
                     skipped += 1
+                    print(f'thumbnail_failed path={path}', flush=True)
                 elif made:
                     created += 1
                 else:
