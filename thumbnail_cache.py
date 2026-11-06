@@ -5,6 +5,7 @@ import os
 import subprocess
 import sys
 import threading
+import warnings
 from pathlib import Path
 
 from PIL import Image, ImageOps, UnidentifiedImageError
@@ -59,17 +60,30 @@ def generate(path):
                     temporary.unlink(missing_ok=True)
                     return None, False
             else:
-                with Image.open(path) as image:
-                    image = ImageOps.exif_transpose(image)
-                    image.thumbnail(SIZE, Image.Resampling.LANCZOS)
-                    if image.mode != 'RGB':
-                        background = Image.new('RGB', image.size, 'white')
-                        if 'A' in image.getbands():
-                            background.paste(image, mask=image.getchannel('A'))
-                        else:
-                            background.paste(image)
-                        image = background
-                    image.save(temporary, format='JPEG', quality=82, optimize=True)
+                jpeg = Path(path).suffix.lower() in ('.jpg', '.jpeg')
+                original_limit = Image.MAX_IMAGE_PIXELS
+                try:
+                    if jpeg:
+                        # JPEG draft decoding reduces the pixels before the full image is loaded.
+                        # Keep a finite header limit; this runs in the isolated thumbnail child.
+                        Image.MAX_IMAGE_PIXELS = 150_000_000
+                    with warnings.catch_warnings():
+                        warnings.simplefilter('ignore', Image.DecompressionBombWarning)
+                        with Image.open(path) as image:
+                            if jpeg:
+                                image.draft('RGB', SIZE)
+                            image = ImageOps.exif_transpose(image)
+                            image.thumbnail(SIZE, Image.Resampling.LANCZOS)
+                            if image.mode != 'RGB':
+                                background = Image.new('RGB', image.size, 'white')
+                                if 'A' in image.getbands():
+                                    background.paste(image, mask=image.getchannel('A'))
+                                else:
+                                    background.paste(image)
+                                image = background
+                            image.save(temporary, format='JPEG', quality=82, optimize=True)
+                finally:
+                    Image.MAX_IMAGE_PIXELS = original_limit
             os.replace(temporary, cached)
             return cached, True
         except (OSError, ValueError, UnidentifiedImageError, subprocess.TimeoutExpired):
