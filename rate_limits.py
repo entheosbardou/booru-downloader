@@ -2,6 +2,7 @@
 import threading,time,math,re
 from email.utils import parsedate_to_datetime
 from urllib.parse import urlparse
+from rate_groups import group
 
 class Deferred(Exception):
     def __init__(self,until):
@@ -31,9 +32,7 @@ class Governor:
     def key(self,site,url,api):
         host=urlparse(url).hostname or ''
         if not api:return ('media',host)
-        root=urlparse(site).hostname or host
-        if root.endswith('.donmai.us'):root='danbooru.donmai.us'
-        if root in ('e621.net','e926.net'):root='e621.net'
+        root=group(site) or host
         path=urlparse(url).path
         endpoint='api'
         if root=='twibooru.org':

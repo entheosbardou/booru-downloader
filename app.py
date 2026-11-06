@@ -22,6 +22,7 @@ from source import (DEFAULT_SOURCE_URL, SOURCE_URL, SOURCE_NAME, SOURCE_API, FIL
                     POST_PATH, RATING_LABELS, SAFE_RATING, USER_AGENT, post_url, rating_directory)
 from adapters import BooruSource, PRESETS, ADAPTERS, safe_subdir, Redirects
 from rate_limits import governor, Deferred
+from rate_groups import group_sources
 import tag_index
 import purge_search
 from relational import post_value
@@ -130,7 +131,10 @@ def get_source(db, source_id, require_enabled=False):
 
 
 def source_client(db,row):
-    return BooruSource(dict(db.source_config(row['id']), id=row['id'], name=row['name'],url=row['url'], api=row['api'], enabled=bool(row['enabled']) and row['deleted_at'] is None))
+    client = BooruSource(dict(db.source_config(row['id']), id=row['id'], name=row['name'],url=row['url'], api=row['api'], enabled=bool(row['enabled']) and row['deleted_at'] is None))
+    client.selected_min_delay = client.min_delay
+    client.min_delay = max([client.min_delay] + [float(delay) for _,delay in group_sources(db,row['id']) if delay is not None])
+    return client
 
 
 def destination(value, create=False):

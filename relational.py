@@ -3,6 +3,7 @@ import hashlib
 import os
 from pathlib import Path
 from datetime import datetime, timezone
+from rate_groups import group_sources
 
 SOURCE_FIELDS = ('api_url','api_path','post_path','download_subdir','user_agent','min_delay',
     'download_interval','requires_credentials','auth_mode','api_key_name','response_path',
@@ -216,7 +217,8 @@ class Relational:
         self.raw_execute("UPDATE file_locations l JOIN storage_roots r ON r.id=l.storage_root_id JOIN media_files mf ON mf.file_id=l.file_id JOIN post_media m ON m.id=mf.media_id SET l.status='missing',l.last_checked_at=UTC_TIMESTAMP(6) WHERE m.post_id=%s AND CONCAT(TRIM(TRAILING '/' FROM r.configured_path),'/',l.relative_path)=%s",(post_id,path))
 
     def set_backoff(self,source_id,until,failures):
-        self.raw_execute('INSERT INTO source_runtime(source_id,backoff_until,consecutive_failures) VALUES(%s,%s,%s) ON DUPLICATE KEY UPDATE backoff_until=VALUES(backoff_until),consecutive_failures=VALUES(consecutive_failures)',(source_id,utc(until),failures))
+        for member_id,_ in group_sources(self,source_id):
+            self.raw_execute('INSERT INTO source_runtime(source_id,backoff_until,consecutive_failures) VALUES(%s,%s,%s) ON DUPLICATE KEY UPDATE backoff_until=GREATEST(COALESCE(backoff_until,VALUES(backoff_until)),VALUES(backoff_until)),consecutive_failures=GREATEST(consecutive_failures,VALUES(consecutive_failures))',(member_id,utc(until),failures))
 
     def set_dispatch(self,search_id,when):
         self.raw_execute('INSERT INTO source_runtime(source_id,last_download_started_at) SELECT source_id,%s FROM collection_sources WHERE id=%s ON DUPLICATE KEY UPDATE last_download_started_at=VALUES(last_download_started_at)',(utc(when),search_id))
