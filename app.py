@@ -13,7 +13,7 @@ from email.utils import parsedate_to_datetime
 from urllib.error import HTTPError
 from contextlib import contextmanager
 from pathlib import Path
-from urllib.parse import urlparse, parse_qs
+from urllib.parse import urlparse, urlunparse, parse_qs
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 from flask import Flask, Response, abort, jsonify, request, send_from_directory, send_file
@@ -1255,7 +1255,12 @@ def transfer_file(job, payload, post, client, target, algorithm, expected, delay
         if not post.get('file_url'):
             raise ValueError('The site API did not provide an original file for this post. Open the source post to check account access; refreshing cannot restore a file the site withholds.')
         post = refresh_expiring_media(payload['id'], client, post, 'file_url')
-        url = client.valid_file_url(post.get('file_url') or '')
+        url = post.get('file_url') or ''
+        parsed = urlparse(url)
+        if (urlparse(client.url).hostname == 'xbooru.com'
+                and parsed.hostname == 'img.xbooru.com' and not parsed.query):
+            url = urlunparse(parsed._replace(query=str(post['id'])))
+        url = client.valid_file_url(url)
         partial = target.with_suffix(target.suffix + '.part-' + str(job['id']))
         for attempt in range(int(job['max_attempts'])):
             check_stop(job['id'])

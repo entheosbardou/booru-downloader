@@ -1,5 +1,9 @@
 # Project status
 
+## Xbooru original image URLs (November 6, 2026)
+
+- Six Xbooru posts had twelve failed download jobs because their stored HTTPS image URLs redirected to an HTTP hotlink page. A read-only probe from the production container showed that appending `?<post-id>` to each original URL returned image data for all six posts. Local source now adds that query string for Xbooru original downloads when it is missing, while retaining HTTPS URL validation. Python compilation, JavaScript syntax, Compose configuration, and diff checks passed. A clean Docker build could not run because Docker Desktop's Linux engine was unavailable. This source change has not been deployed, and no production download was retried.
+
 ## Shared external API limits (November 5, 2026)
 
 - Local source now groups Danbooru with Danbooru Safe and shima, Konachan with Konachan.net, and e621 with e926. Sites using the same effective API hostname also share a group. API request pacing uses the slowest selected rate among group members; a server cooldown recorded for one member is written to every active member's runtime row. The UI retains each site's selected rate and exposes the effective rate separately. This uses existing tables and requires no schema migration. The change has not been deployed. Python compilation, JavaScript syntax, Compose configuration, focused group checks, and a Docker image build (`booru-downloader:shared-api-limits`) passed. A production crawl and cooldown propagation have not been tested. On November 5, Danbooru's public account reported a multi-day site outage during a security incident; the observed Danbooru cooldowns should not be interpreted as proof that the selected rate is too high.
