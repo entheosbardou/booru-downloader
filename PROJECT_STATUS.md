@@ -1,5 +1,10 @@
 # Project status
 
+## Crawl saved searches by site (November 11, 2026)
+
+- **Crawl saved searches** queues existing searches across the library for one or more selected sites. Set the batch limit per search and choose **Resume from saved progress** or **Start from newest**. The latter resets crawl checkpoints and keeps saved results. Resume skips exhausted searches, and both modes skip pending crawls and unavailable sites. The app reports queued and skipped counts. No database migration is required.
+- Python compilation, JavaScript syntax, Compose validation, and a clean build on `linux-docker` passed (`booru-downloader:saved-site-crawls`, image ID `sha256:d4da1a17c75938479188cb5c3c7db8797f376c8f5df79c22cf749d806ae7143f`). An isolated route test verified site scoping, checkpoint handling, duplicate prevention, and rollback. A browser test verified site selection and form submission with fixture data. Production deployment and live crawl verification are pending.
+
 ## Sankaku session renewal (November 11, 2026)
 
 - The Sankaku adapter renews access tokens before a request when the token is missing or near expiry. It also renews and retries once after HTTP 401. Save `refreshToken=…` in **Session cookie** with **Adapter default** authentication and the preset API URL `https://sankakuapi.com`. The renewed access and refresh tokens are saved together in the existing credential directory. No database migration is required.

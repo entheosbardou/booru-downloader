@@ -196,8 +196,12 @@ def read_setting(db, key, default=''):
     return row[0] if row else default
 
 
+def crawl_pending(db, search_id):
+    return db.execute("SELECT 1 FROM jobs WHERE search_id=? AND kind='crawl' AND status IN ('queued','running') LIMIT 1", (search_id,)).fetchone() is not None
+
+
 def add_job(db, kind, search_id, payload, total):
-    if kind == 'crawl' and db.execute("SELECT 1 FROM jobs WHERE search_id=? AND kind='crawl' AND status IN ('queued','running')", (search_id,)).fetchone():
+    if kind == 'crawl' and crawl_pending(db, search_id):
         raise ValueError('This search is already queued or running.')
     job = db.create_job(kind, search_id, payload, total)
     WAKE.set()
@@ -538,24 +542,75 @@ def scoped_searches(db, sid=None, gid=None, include_deleted=False):
     return rows
 
 
+def queue_saved_crawls(db, searches, clients, batches, restart, unavailable):
+    # Call under the dispatcher lock so the pending check and enqueue are serialized.
+    jobs, skipped = [], []
+    for search in searches:
+        sid, source_id = search['id'], search['source_id']
+        reason = 'already running' if crawl_pending(db, sid) else unavailable.get(source_id)
+        if not reason and search['complete'] and not restart:
+            reason = 'exhausted'
+        if reason:
+            skipped.append(dict(search_id=sid, site=clients[source_id].name, reason=reason))
+            continue
+        if restart:
+            db.execute("UPDATE searches SET cursor=NULL,offset=0,page_signature='',complete=0 WHERE id=?", (sid,))
+        jobs.append(db.create_job('crawl', sid, {'batches': batches}, batches))
+    return jobs, skipped
+
+
 @app.post('/api/collections/<int:gid>/resume')
 @app.post('/api/searches/<int:sid>/resume')
 def resume(sid=None, gid=None):
     body = request.get_json()
     batches = positive(body.get('batches', 10), 1000)
-    jobs, skipped = [], []
     with database() as db:
         db.execute('BEGIN IMMEDIATE')
-        for search in scoped_searches(db, sid, gid):
-            client = get_source(db, search['source_id'])
-            busy = db.execute("SELECT 1 FROM jobs WHERE search_id=? AND kind='crawl' AND status IN ('queued','running')", (search['id'],)).fetchone()
-            reason = 'already running' if busy else 'disabled' if not client.enabled else 'exhausted' if search['complete'] and not body.get('restart') else None
-            if reason:
-                skipped.append(dict(search_id=search['id'],site=client.name,reason=reason))
-                continue
-            if body.get('restart'):
-                db.execute("UPDATE searches SET cursor=NULL,offset=0,page_signature='',complete=0 WHERE id=?", (search['id'],))
-            jobs.append(add_job(db, 'crawl', search['id'], {'batches':batches}, batches))
+        searches = scoped_searches(db, sid, gid)
+        clients = {source_id: get_source(db, source_id) for source_id in {s['source_id'] for s in searches}}
+        unavailable = {source_id: 'disabled' for source_id, client in clients.items() if not client.enabled}
+        jobs, skipped = queue_saved_crawls(db, searches, clients, batches, body.get('restart'), unavailable)
+    if jobs:
+        WAKE.set()
+    return jsonify(jobs=jobs, queued=len(jobs), skipped=skipped)
+
+
+@app.post('/api/searches/crawl-by-site')
+def crawl_saved_searches_by_site():
+    body = request.get_json()
+    if not isinstance(body, dict):
+        raise ValueError('Choose sites and a crawl mode.')
+    source_ids = body.get('source_ids')
+    if (not isinstance(source_ids, list) or not 1 <= len(source_ids) <= 100
+            or any(type(i) is not int or i < 1 for i in source_ids)):
+        raise ValueError('Choose between 1 and 100 sites.')
+    source_ids = list(dict.fromkeys(source_ids))
+    batches = body.get('batches', 10)
+    if type(batches) is not int:
+        raise ValueError('Enter a whole number of batches.')
+    batches = positive(batches, 1000)
+    mode = body.get('mode', 'resume')
+    if mode not in ('resume', 'refresh'):
+        raise ValueError('Choose Resume or Start from newest.')
+    placeholders = ','.join('?' for _ in source_ids)
+    with database() as db:
+        db.execute('BEGIN IMMEDIATE')
+        clients = {source_id: get_source(db, source_id) for source_id in source_ids}
+        unavailable = {}
+        for source_id, client in clients.items():
+            if not client.enabled:
+                unavailable[source_id] = 'disabled'
+            elif client.api == 'unconfigured':
+                unavailable[source_id] = 'needs setup'
+            elif client.requires_credentials and not client.has_credentials:
+                unavailable[source_id] = 'needs credentials'
+        searches = db.execute(f'''SELECT s.id,s.source_id,s.complete
+          FROM searches s JOIN collections c ON c.id=s.collection_id
+          WHERE s.source_id IN ({placeholders}) AND s.deleted_at IS NULL AND c.deleted_at IS NULL
+          ORDER BY s.id''', source_ids).fetchall()
+        jobs, skipped = queue_saved_crawls(db, searches, clients, batches, mode == 'refresh', unavailable)
+    if jobs:
+        WAKE.set()
     return jsonify(jobs=jobs, queued=len(jobs), skipped=skipped)
 
 
