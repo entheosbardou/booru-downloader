@@ -1,5 +1,10 @@
 # Project status
 
+## Sankaku session renewal (November 11, 2026)
+
+- The Sankaku adapter renews access tokens before a request when the token is missing or near expiry. It also renews and retries once after HTTP 401. Save `refreshToken=…` in **Session cookie** with **Adapter default** authentication and the preset API URL `https://sankakuapi.com`. The renewed access and refresh tokens are saved together in the existing credential directory. No database migration is required.
+- Python compilation, JavaScript syntax, Compose validation, and five regression tests passed. A clean build on `linux-docker` produced `booru-downloader:sankaku-refresh` (image ID `sha256:3d8d2c70f15b3efff306c8a39ba8e9ed8e9dfd9bbecdadb403dee7e82a47b447`). The tests passed in the built image, and an isolated check confirmed four concurrent renewal calls shared one exchange. A live request with a synthetic invalid refresh token returned HTTP 401. Valid-account renewal and production deployment are pending.
+
 ## Crawl database lock timeouts (November 10, 2026)
 
 - Production crawl failures recorded InnoDB lock wait error 1205. The dispatcher advisory lock was free during inspection. Production code updates the shared saved-tag progress row for each post in the page transaction, so overlapping crawls can hold that row while waiting for other post or tag writes. The exact blocking sessions for the failed transactions were unavailable.

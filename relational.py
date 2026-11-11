@@ -1,6 +1,7 @@
 """Typed persistence. JSON is only a network format; never a storage format."""
 import hashlib
 import os
+from tempfile import NamedTemporaryFile
 from pathlib import Path
 from datetime import datetime, timezone
 from rate_groups import group_sources
@@ -9,6 +10,26 @@ SOURCE_FIELDS = ('api_url','api_path','post_path','download_subdir','user_agent'
     'download_interval','requires_credentials','auth_mode','api_key_name','response_path',
     'query_param','page_param','limit_param','page_base','notes')
 SECRET_FIELDS = ('username','api_key','cookie')
+
+
+def credential_directory(ref):
+    return Path(os.environ.get('BOORU_CREDENTIAL_DIR', '/run/booru-credentials')) / ref
+
+
+def save_sankaku_session(ref, access, cookie):
+    path = credential_directory(ref) / 'sankaku_session'
+    temp_path = None
+    try:
+        with NamedTemporaryFile(mode='w', encoding='utf-8', dir=path.parent, delete=False) as temp:
+            temp_path = Path(temp.name)
+            temp.write(access + '\n' + cookie)
+            temp.flush()
+            os.fsync(temp.fileno())
+        temp_path.replace(path)
+    finally:
+        if temp_path is not None:
+            temp_path.unlink(missing_ok=True)
+
 
 def tag_names(text,api='',raw=None):
     if raw and isinstance(raw.get('tag_names'),list):
@@ -67,9 +88,17 @@ class Relational:
         cfg['file_hosts']=[r[0] for r in self.raw_execute('SELECT hostname FROM source_allowed_hosts WHERE source_id=%s',(source_id,)).fetchall()]
         ref=d.get('credential_ref')
         if ref:
+            directory = credential_directory(ref)
             for key in SECRET_FIELDS:
-                path=Path(os.environ.get('BOORU_CREDENTIAL_DIR','/run/booru-credentials'))/ref/key
+                path=directory/key
                 if path.exists():cfg[key]=path.read_text()
+            if cfg.get('api') == 'sankaku':
+                try:
+                    session = (directory/'sankaku_session').read_text(encoding='utf-8')
+                except FileNotFoundError:
+                    pass
+                else:
+                    cfg['api_key'], cfg['cookie'] = session.split('\n', 1)
         cur=self.raw_execute('SELECT ok,message,UNIX_TIMESTAMP(checked_at),nsfw_available FROM source_checks WHERE source_id=%s',(source_id,));r=cur.fetchone()
         if r:
             cfg['last_test']=dict(ok=bool(r[0]),message=r[1],checked_at=float(r[2]))
@@ -87,7 +116,7 @@ class Relational:
         if any(cfg.get(k) for k in SECRET_FIELDS):
             import uuid
             ref=f'source-{source_id}-{uuid.uuid4().hex}'
-            path=Path(os.environ.get('BOORU_CREDENTIAL_DIR','/run/booru-credentials'))/ref
+            path=credential_directory(ref)
             path.mkdir(mode=0o700,parents=True)
             for key in SECRET_FIELDS:
                 if cfg.get(key):

@@ -3,7 +3,7 @@ import base64
 import json
 import re
 import time
-from http.cookies import SimpleCookie
+from http.cookies import CookieError, SimpleCookie
 from datetime import datetime, timezone
 import xml.etree.ElementTree as ET
 from pathlib import PurePosixPath
@@ -12,6 +12,9 @@ from urllib.parse import urlencode, urljoin, urlparse, urlunparse, quote, parse_
 from urllib.request import Request, HTTPRedirectHandler, build_opener
 
 from rate_limits import governor
+
+SANKAKU_API = 'https://sankakuapi.com'
+SANKAKU_ACCEPT = 'application/vnd.sankaku.api+json;v=2'
 
 ADAPTERS = {
     'moebooru': 'Moebooru', 'danbooru': 'Danbooru', 'gelbooru': 'Gelbooru / DAPI',
@@ -49,7 +52,7 @@ PRESETS = [
     dict(name='FindAWolf', url='https://findawolf.com', api='shimmie', notes='Directory lists findawolf.com; findawolf.net did not resolve.'),
     dict(name='Bcbnsfw', url='https://booru.bcbnsfw.space', api='unconfigured', notes='Adapter needs verification; site returned a regional access restriction during inspection.'),
     dict(name='Sankaku Channel', url='https://chan.sankakucomplex.com', api='sankaku',
-         api_url='https://sankakuapi.com', file_hosts=['sankakucomplex.com', 'sankaku.app'], requires_credentials=False),
+         api_url=SANKAKU_API, file_hosts=['sankakucomplex.com', 'sankaku.app'], requires_credentials=False),
     dict(name='Zerochan', url='https://www.zerochan.net', api='zerochan', post_path='/', file_hosts=['zerochan.net']),
     dict(name='Anime-Pictures', url='https://anime-pictures.net', api='animepictures',
          api_url='https://api.anime-pictures.net', file_hosts=['anime-pictures.net'], download_interval=5),
@@ -61,7 +64,7 @@ ACCESS_NOTES = {
     'anime-pictures.net': ('Public API', 'Public posts do not require an API key. Restricted posts can require the Anime-Pictures login-session cookie, including for Google OAuth accounts. Use the site session, never Google credentials.', 'https://anime-pictures.net'),
     'gelbooru.com': ('API credentials', 'User ID and API key; API authentication can be enforced for all ratings, not only NSFW.', 'https://gelbooru.com/index.php?page=wiki&s=view&id=18780'),
     'rule34.xxx': ('API credentials', 'User ID and API key are mandatory for API requests, including NSFW.', 'https://api.rule34.xxx/'),
-    'chan.sankakucomplex.com': ('Public / optional token', 'Anonymous requests can return public posts. An optional account access token applies account access; restricted or premium posts can still require additional permissions.', 'https://chan.sankakucomplex.com'),
+    'chan.sankakucomplex.com': ('Public / optional token', 'For automatic renewal, paste refreshToken=… in Session cookie and use Adapter default authentication. An access token is optional when a refresh token is saved.', 'https://chan.sankakucomplex.com'),
     'danbooru.donmai.us': ('Account-dependent', 'Public posts can be anonymous. Username and API key authenticate your account; restricted post visibility depends on account privileges. NSFW rating alone does not mean every post needs a key.', 'https://danbooru.donmai.us/wiki_pages/help:api'),
     'e621.net': ('Public / optional login', 'Public post listing supports anonymous access. Username and API key are optional for account access; site restrictions may still apply.', 'https://e621.net/help/api'),
     'yande.re': ('Public API', 'Public listing supports anonymous access. No separate NSFW API key requirement is documented in the configured API; individual site restrictions still apply.', 'https://yande.re/help/api'),
@@ -133,8 +136,13 @@ class Redirects(HTTPRedirectHandler):
         return redirected
 
 
+class NoRedirects(HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
 class BooruSource:
-    def __init__(self, config):
+    def __init__(self, config, refresh_sankaku=None):
         self.config = dict(config)
         self.id = number(config.get('id'))
         self.url = origin(config.get('url', ''))
@@ -146,6 +154,7 @@ class BooruSource:
         self.username = str(config.get('username') or '')
         self.api_key = str(config.get('api_key') or '')
         self.cookie = str(config.get('cookie') or '')
+        self.refresh_sankaku = refresh_sankaku
         if any('\r' in value or '\n' in value for value in (self.cookie, self.api_key)):
             raise ValueError('Credentials must be single-line values.')
         if len(self.api_key) > 8192 or len(self.cookie) > 16384:
@@ -215,7 +224,7 @@ class BooruSource:
         return dict(id=self.id, name=self.name, url=self.url, api_url=self.api_url,
                     api=self.api, api_label=ADAPTERS[self.api], api_path=self.api_path,
                     file_hosts=self.file_hosts, download_subdir=self.subdir, enabled=self.enabled,
-                    has_credentials=bool(self.api_key), requires_credentials=self.requires_credentials,
+                    has_credentials=self.has_credentials, requires_credentials=self.requires_credentials,
                     has_cookie=bool(self.cookie), post_path=self.post_path,
                     needs_setup=self.api == 'unconfigured', notes=self.config.get('notes', ''),
                     min_delay=getattr(self,'selected_min_delay',self.min_delay), effective_min_delay=self.min_delay,
@@ -224,7 +233,7 @@ class BooruSource:
                     auth_mode=self.auth_mode, api_key_name=self.api_key_name,
                     query_param=self.config.get('query_param', 'q'), page_param=self.config.get('page_param', 'page'),
                     limit_param=self.config.get('limit_param', 'limit'), page_base=number(self.config.get('page_base'), 1),
-                    needs_credentials=self.requires_credentials and not self.api_key,
+                    needs_credentials=self.requires_credentials and not self.has_credentials,
                     user_agent=self.user_agent, rating_labels=self.rating_labels, rating_groups=self.rating_groups,
                     rating_order=list(self.rating_labels), safe_rating='g' if self.api == 'danbooru' else 's',
                     query_help='Use the site’s query syntax, e.g. landscape, safe' if self.api == 'philomena' else 'Use a Zerochan tag name, e.g. Landscape' if self.api == 'zerochan' else 'Use the site’s search tags or query',
@@ -315,13 +324,90 @@ class BooruSource:
             raise ValueError('API redirect leaves the configured API host. Check the site profile.')
         return url
 
+    @property
+    def has_credentials(self):
+        return bool(self.api_key or (self.api == 'sankaku' and self.auth_mode == 'auto' and
+                                    (self.sankaku_token or self.can_refresh_sankaku)))
+
+    @property
+    def sankaku_token(self):
+        return self.api_key or self.sankaku_cookie('accessToken')
+
+    @staticmethod
+    def sankaku_token_expired(token):
+        if not token:
+            return True
+        try:
+            payload = token.split('.')[1]
+            claims = json.loads(base64.urlsafe_b64decode(payload + '=' * (-len(payload) % 4)))
+        except (IndexError, ValueError):
+            return False
+        expiry = claims.get('exp') if isinstance(claims, dict) else None
+        return isinstance(expiry, (int, float)) and expiry <= time.time() + 30
+
+    def sankaku_cookie(self, name):
+        cookies = SimpleCookie()
+        try:
+            cookies.load(self.cookie)
+        except CookieError:
+            return ''
+        return cookies[name].value if name in cookies else ''
+
+    @property
+    def can_refresh_sankaku(self):
+        return (self.api == 'sankaku' and self.api_url == SANKAKU_API and
+                self.auth_mode == 'auto' and bool(self.sankaku_cookie('refreshToken')))
+
+    def request_cookie(self):
+        if self.api != 'sankaku' or 'refreshToken' not in self.cookie:
+            return self.cookie
+        # The refresh token belongs in the token exchange, never in a post or file request.
+        hidden = {'refreshToken', 'accessToken'} if self.can_refresh_sankaku else {'refreshToken'}
+        pairs = re.findall(r'(?:[^;"]|"(?:\\.|[^"\\])*")+', self.cookie)
+        return '; '.join(pair.strip() for pair in pairs
+                         if pair.strip() and pair.partition('=')[0].strip() not in hidden)
+
+    def exchange_sankaku_token(self, timeout):
+        req = Request(SANKAKU_API + '/auth/token',
+                      data=json.dumps({'refresh_token': self.sankaku_cookie('refreshToken')}).encode(),
+                      headers={'Content-Type': 'application/json', 'Accept': SANKAKU_ACCEPT,
+                               'Origin': 'https://sankaku.app', 'Platform': 'web-app',
+                               'Client-Type': 'non-premium', 'Api-Version': '2',
+                               'Expiration-Policy': 'reduced', 'User-Agent': self.user_agent})
+        # Reject redirects so the token in the POST body stays on the verified API endpoint.
+        opener = build_opener(NoRedirects())
+        governor.before(self.url, req.full_url, interval=self.min_delay)
+        try:
+            with opener.open(req, timeout=timeout) as response:
+                governor.observe(self.url, req.full_url, response.headers)
+                data = json.loads(response.read(64 * 1024))
+        except HTTPError as exc:
+            governor.observe(self.url, req.full_url, exc.headers, exc.code)
+            if exc.code in (400, 401, 403):
+                raise ValueError('Sankaku rejected the refresh token. Save a fresh refreshToken cookie under Sites.') from None
+            raise ValueError(f'Sankaku token refresh returned HTTP {exc.code}.') from None
+        except (URLError, TimeoutError, ValueError):
+            raise ValueError('Sankaku token refresh did not return a usable response. Try again.') from None
+        if isinstance(data, dict) and data.get('success') is False:
+            raise ValueError('Sankaku rejected the refresh token. Save a fresh refreshToken cookie under Sites.')
+        access = data.get('access_token') if isinstance(data, dict) else None
+        refresh = data.get('refresh_token', self.sankaku_cookie('refreshToken')) if isinstance(data, dict) else None
+        if not all(isinstance(token, str) and len(token) <= 8192 and
+                   re.fullmatch(r'[A-Za-z0-9._~+/=-]+', token) for token in (access, refresh)):
+            raise ValueError('Sankaku token refresh did not return usable credentials.')
+        cookie = '; '.join(filter(None, (self.request_cookie(), 'refreshToken=' + refresh)))
+        if len(cookie) > 16384:
+            raise ValueError('The renewed Sankaku session cookie exceeds the site profile limit.')
+        return access, cookie
+
     def request(self, tags, cursor=None, offset=0, limit=100, rating=''):
         tags = self.with_rating(tags, rating)
         limit = min(50 if self.api == 'philomena' else 100, limit)
         headers = {'User-Agent': self.user_agent, 'Accept': 'application/json, application/xml;q=0.8'}
-        if self.cookie:
-            headers['Cookie'] = self.cookie
-        if self.requires_credentials and not self.api_key:
+        cookie = self.request_cookie()
+        if cookie:
+            headers['Cookie'] = cookie
+        if self.requires_credentials and not self.has_credentials:
             raise ValueError(f'{self.name} needs API credentials. Open Sites and add your user ID and API key.')
         if self.api in ('danbooru', 'e621', 'moebooru') and self.api_key:
             if not self.username:
@@ -351,17 +437,10 @@ class BooruSource:
             params = dict(tags=tags, limit=limit, lang='en')
             if cursor:
                 params['next'] = str(cursor)
-            token = self.api_key
-            if not token and self.cookie:
-                cookies = SimpleCookie()
-                try:
-                    cookies.load(self.cookie)
-                    token = cookies['accessToken'].value if 'accessToken' in cookies else ''
-                except Exception:
-                    token = ''
+            token = self.sankaku_token
             if token:
                 headers['Authorization'] = 'Bearer ' + token
-            headers['Accept'] = 'application/vnd.sankaku.api+json;v=2'
+            headers['Accept'] = SANKAKU_ACCEPT
         elif self.api == 'zerochan':
             path = '/' + quote(tags, safe=',+')
             params = dict(json=1, l=20, p=offset + 1)
@@ -615,8 +694,9 @@ class BooruSource:
         # Saved credentials go only to the configured API host, never a CDN.
         if urlparse(url).hostname != urlparse(self.api_url).hostname:
             return headers
-        if self.cookie:
-            headers['Cookie'] = self.cookie
+        cookie = self.request_cookie()
+        if cookie:
+            headers['Cookie'] = cookie
         if self.api_key:
             mode = self.auth_mode
             if mode == 'basic' or (mode == 'auto' and self.api in ('danbooru','e621','moebooru')):
@@ -654,7 +734,13 @@ class BooruSource:
 
     def _read(self, req, delay, before_request, retries, timeout, parser=None):
         opener = build_opener(Redirects(self.valid_api_url))
-        for attempt in range(retries):
+        refresh = self.refresh_sankaku if self.can_refresh_sankaku else None
+        if refresh and self.sankaku_token_expired(self.sankaku_token):
+            self.api_key = refresh(self.sankaku_token, timeout)
+            req.add_header('Authorization', 'Bearer ' + self.api_key)
+            refresh = None
+        attempt = 0
+        while attempt < retries:
             if before_request:
                 before_request()
             else:
@@ -669,6 +755,12 @@ class BooruSource:
                 return (parser or self.parse)(payload)
             except HTTPError as exc:
                 governor.observe(self.url, req.full_url, exc.headers, exc.code)
+                if exc.code == 401 and refresh:
+                    exc.close()
+                    self.api_key = refresh(self.sankaku_token, timeout)
+                    req.add_header('Authorization', 'Bearer ' + self.api_key)
+                    refresh = None
+                    continue
                 if exc.code not in (429, 500, 502, 503, 504) or attempt == retries - 1:
                     hint = ' Check credentials, API URL, or site access restrictions.' if exc.code in (401, 403) else ''
                     raise ValueError(f'{self.name} API returned HTTP {exc.code}.{hint}') from None
@@ -678,3 +770,4 @@ class BooruSource:
                 if attempt == retries - 1:
                     raise ValueError(f'Could not reach {self.name}. Check the site connection and try again.') from None
                 time.sleep(2 ** (attempt + 1))
+            attempt += 1

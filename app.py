@@ -26,7 +26,7 @@ from rate_limits import governor, Deferred
 from rate_groups import group_sources
 import tag_index
 import purge_search
-from relational import post_value
+from relational import post_value, save_sankaku_session
 from library_groups import query_key, register_collection, shared_folder, migrate_library_groups
 from thumbnail_cache import cached_path, generate_isolated as generate_thumbnail, valid_original
 
@@ -132,10 +132,33 @@ def get_source(db, source_id, require_enabled=False):
 
 
 def source_client(db,row):
-    client = BooruSource(dict(db.source_config(row['id']), id=row['id'], name=row['name'],url=row['url'], api=row['api'], enabled=bool(row['enabled']) and row['deleted_at'] is None))
+    source_id = row['id']
+    client = BooruSource(
+        dict(db.source_config(source_id), id=source_id, name=row['name'], url=row['url'],
+             api=row['api'], enabled=bool(row['enabled']) and row['deleted_at'] is None),
+        refresh_sankaku=lambda rejected, timeout: refresh_sankaku_session(source_id, rejected, timeout),
+    )
     client.selected_min_delay = client.min_delay
     client.min_delay = max([client.min_delay] + [float(delay) for _,delay in group_sources(db,row['id']) if delay is not None])
     return client
+
+
+def refresh_sankaku_session(source_id, rejected, timeout):
+    # Another request may already have exchanged this refresh token and saved its replacement.
+    with file_lock(f'sankaku-session-{source_id}'):
+        with database() as db:
+            client = get_source(db, source_id)
+        ref = client.config.get('credential_ref')
+        if not client.can_refresh_sankaku or not ref:
+            raise ValueError('Sankaku session settings changed. Check the saved connection under Sites.')
+        if client.sankaku_token != rejected and not client.sankaku_token_expired(client.sankaku_token):
+            return client.sankaku_token
+        access, cookie = client.exchange_sankaku_token(timeout)
+        try:
+            save_sankaku_session(ref, access, cookie)
+        except OSError:
+            raise ValueError('Could not save the renewed Sankaku session. Check credential storage under the downloader.') from None
+        return access
 
 
 def destination(value, create=False):
@@ -298,7 +321,7 @@ def save_source(source_id=None):
                'user_agent', 'min_delay', 'download_interval', 'requires_credentials', 'enabled',
                'mapping', 'extra_params', 'response_path', 'auth_mode', 'api_key_name',
                'query_param', 'page_param', 'limit_param', 'page_base')
-    with database() as db:
+    with file_lock(f'sankaku-session-{source_id}'), database() as db:
         db.execute('BEGIN IMMEDIATE')
         if source_id and db.execute('SELECT deleted_at FROM sources WHERE id=?',(source_id,)).fetchone() and db.execute('SELECT deleted_at FROM sources WHERE id=?',(source_id,)).fetchone()[0] is not None:
             raise ValueError('This site was removed. Restore it before editing.')
@@ -336,7 +359,7 @@ def save_source(source_id=None):
 
 @app.post('/api/sources/<int:source_id>/remove')
 def remove_source(source_id):
-    with database() as db:
+    with file_lock(f'sankaku-session-{source_id}'), database() as db:
         db.execute('BEGIN IMMEDIATE')
         get_source(db,source_id)
         db.raw_execute("""UPDATE sources SET deleted_at=COALESCE(deleted_at,UTC_TIMESTAMP(6)),enabled=0,
@@ -479,7 +502,7 @@ def new_search():
             client = get_source(db, source_id, require_enabled=True)
             if client.api == 'unconfigured':
                 raise ValueError(f'{client.name} needs an adapter configured under Sites.')
-            if client.requires_credentials and not client.api_key:
+            if client.requires_credentials and not client.has_credentials:
                 raise ValueError(f'{client.name} needs credentials under Sites first.')
             client.with_rating(tags, rating)
         gid = create_collection(db, tags, rating, time.time())
