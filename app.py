@@ -17,6 +17,7 @@ from urllib.parse import urlparse, urlunparse, parse_qs
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 from flask import Flask, Response, abort, jsonify, request, send_from_directory, send_file
+from pymysql.err import OperationalError
 from crawler import FIELDS
 from source import (DEFAULT_SOURCE_URL, SOURCE_URL, SOURCE_NAME, SOURCE_API, FILE_HOSTS, valid_file_url,
                     POST_PATH, RATING_LABELS, SAFE_RATING, USER_AGENT, post_url, rating_directory)
@@ -1076,6 +1077,37 @@ def check_stop(jid):
         raise Stopped()
 
 
+def save_crawl_batch(job, client, posts, batch, next_cursor, signature, complete):
+    for attempt in range(3):
+        try:
+            with database() as db:
+                indexed_posts = []
+                for post in posts:
+                    if client.api == 'animepictures' and not post.get('tags'):
+                        cached = db.execute('SELECT * FROM post_records WHERE source_id=? AND remote_id=?',
+                                            (client.id, str(post['id']))).fetchone()
+                        if cached:
+                            post = {**post, 'tags': post_value(cached).get('tags') or ''}
+                    sort_key = post.get('_sort') or (post['id'] if isinstance(post['id'], int) else time.time())
+                    record_id = db.save_post(post, client.id, sort_key, indexed_posts=indexed_posts)
+                    if record_id is not None:
+                        db.execute('INSERT OR IGNORE INTO matches VALUES (?,?)', (job['search_id'], record_id))
+                db.execute('UPDATE searches SET cursor=?,offset=offset+1,page_signature=?,complete=? WHERE id=?',
+                           (next_cursor, signature, int(complete), job['search_id']))
+                db.execute('UPDATE jobs SET progress=?,message=? WHERE id=?',
+                           (batch+1, f'{client.name}: batch {batch+1}, {len(posts)} posts saved', job['id']))
+                # All crawls share this row. Take its lock after the page's other writes.
+                if indexed_posts:
+                    db.update_post_index_progress(sum(created for _, created in indexed_posts),
+                                                  max(record_id for record_id, _ in indexed_posts))
+            return
+        except OperationalError as exc:
+            if exc.args[0] not in (1205, 1213) or attempt == 2:
+                raise
+            time.sleep(0.2 * (attempt + 1))
+            check_stop(job['id'])
+
+
 def crawl(job, payload):
     for batch in range(int(job['progress']), int(payload['batches'])):
         check_stop(job['id'])
@@ -1106,20 +1138,7 @@ def crawl(job, payload):
             raise ValueError('The site repeated the previous page. Check its pagination settings.')
         next_cursor = min(ids) if ids and client.cursor_kind == 'id' else client.next_cursor if client.cursor_kind == 'token' else None
         complete = client.exhausted if client.api == 'animepictures' or multi_rating else not ids or client.exhausted
-        with database() as db:
-            for post in batch_posts:
-                if client.api == 'animepictures' and not post.get('tags'):
-                    cached = db.execute('SELECT * FROM post_records WHERE source_id=? AND remote_id=?',(client.id,str(post['id']))).fetchone()
-                    if cached:
-                        post['tags'] = post_value(cached).get('tags') or ''
-                record_id = db.save_post(post,client.id,post.get('_sort') or (post['id'] if isinstance(post['id'],int) else time.time()))
-                if record_id is None:
-                    continue
-                db.execute('INSERT OR IGNORE INTO matches VALUES (?,?)', (search['id'], record_id))
-            db.execute('UPDATE searches SET cursor=?,offset=offset+1,page_signature=?,complete=? WHERE id=?',
-                       (next_cursor, signature, int(complete), search['id']))
-            db.execute('UPDATE jobs SET progress=?,message=? WHERE id=?',
-                       (batch+1, f'{client.name}: batch {batch+1}, {len(batch_posts)} posts saved', job['id']))
+        save_crawl_batch(job, client, batch_posts, batch, next_cursor, signature, complete)
         if complete:
             return
 

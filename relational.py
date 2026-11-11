@@ -113,7 +113,7 @@ class Relational:
         self.raw_execute('INSERT INTO source_checks VALUES(%s,%s,%s,%s,%s) ON DUPLICATE KEY UPDATE ok=VALUES(ok),message=VALUES(message),checked_at=VALUES(checked_at),nsfw_available=VALUES(nsfw_available)',
             (source_id,result['ok'],result['message'],utc(result['checked_at']),result.get('nsfw_available')))
 
-    def save_post(self,post,source_id,sort_key=None,record_id=None):
+    def save_post(self,post,source_id,sort_key=None,record_id=None,indexed_posts=None):
         created=False
         if record_id:
             existing=self.raw_execute('SELECT availability_status FROM posts WHERE id=%s',(record_id,)).fetchone()
@@ -151,9 +151,20 @@ class Relational:
         if parent:self.raw_execute('INSERT INTO post_relations VALUES(%s,%s,%s,%s)',(record_id,source_id,str(parent),'parent'))
         api=self.raw_execute('SELECT api FROM sources WHERE id=%s',(source_id,)).fetchone()[0]
         self.index_post(record_id,source_id,tags,api,post)
-        self.raw_execute("UPDATE index_progress SET total=total+%s,completed=completed+%s,`cursor`=GREATEST(`cursor`,%s),target=GREATEST(target,%s),updated=UTC_TIMESTAMP(6) WHERE name='saved_tags'",(int(created),int(created),record_id,record_id))
         self.raw_execute('UPDATE result_order r JOIN post_media m ON m.post_id=r.post_id AND m.media_role=\'original\' AND m.position=0 JOIN posts p ON p.id=r.post_id SET r.post_sort=p.sort_key,r.score=COALESCE(p.score,0),r.pixels=COALESCE(m.width,0)*COALESCE(m.height,0) WHERE r.post_id=%s',(record_id,))
+        if indexed_posts is None:
+            self.update_post_index_progress(int(created), record_id)
+        else:
+            indexed_posts.append((record_id, created))
         return record_id
+
+    def update_post_index_progress(self, created, last_id):
+        self.raw_execute(
+            "UPDATE index_progress SET total=total+%s,completed=completed+%s,"
+            "`cursor`=GREATEST(`cursor`,%s),target=GREATEST(target,%s),"
+            "updated=UTC_TIMESTAMP(6) WHERE name='saved_tags'",
+            (created, created, last_id, last_id),
+        )
 
     def index_post(self,post_id,source_id,text,api,raw=None):
         names=tag_names(text,api,raw);categories=tag_categories(raw or {})
@@ -166,7 +177,7 @@ class Relational:
         missing=set(signatures)-set(found)
         cur=self.raw.cursor()
         if missing:
-            cur.executemany('INSERT IGNORE INTO tags(signature,name) VALUES(%s,%s)',[(sig,signatures[sig]) for sig in missing])
+            cur.executemany('INSERT IGNORE INTO tags(signature,name) VALUES(%s,%s)',[(sig,signatures[sig]) for sig in sorted(missing)])
             found=dict(self.raw_execute('SELECT signature,id FROM tags WHERE signature IN ('+marks+')',tuple(signatures)).fetchall())
             grams={(name[i:i+3],found[sig]) for sig in missing for name in [signatures[sig]] for i in range(len(name)-2)}
             if grams:cur.executemany('INSERT IGNORE INTO tag_grams VALUES(%s,%s)',list(grams))

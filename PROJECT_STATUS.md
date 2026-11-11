@@ -1,5 +1,11 @@
 # Project status
 
+## Crawl database lock timeouts (November 10, 2026)
+
+- Production crawl failures recorded InnoDB lock wait error 1205. The dispatcher advisory lock was free during inspection. Production code updates the shared saved-tag progress row for each post in the page transaction, so overlapping crawls can hold that row while waiting for other post or tag writes. The exact blocking sessions for the failed transactions were unavailable.
+- The source now updates shared progress once at the end of the page transaction and inserts new tag signatures in a consistent order. A crawl retries the rolled-back page up to twice for MySQL errors 1205 and 1213. Page results, search checkpoint, job progress, and index progress still commit together. A clean build on `linux-docker` produced `booru-downloader:crawl-lock-fix` (image ID `sha256:756ad9ce6dc50cc399816a8abf83a2831479b9493a3a8ead40585d2b6af232c4`). Production deployment and a live crawl with the fix are pending.
+- Python compilation, JavaScript syntax, Compose validation, and diff checks passed. A test in the built image simulated database errors and verified rollback before retry, a single checkpoint commit, the retry limit, cancellation, and propagation of unrelated errors.
+
 ## Xbooru original image URLs (November 6, 2026)
 
 - Six Xbooru posts had twelve failed download jobs because their stored HTTPS image URLs redirected to an HTTP hotlink page. A read-only probe from the production container showed that appending `?<post-id>` to each original URL returned image data for all six posts. Local source now adds that query string for Xbooru original downloads when it is missing, while retaining HTTPS URL validation. Python compilation, JavaScript syntax, Compose configuration, and diff checks passed. A clean Docker build could not run because Docker Desktop's Linux engine was unavailable. This source change has not been deployed, and no production download was retried.
