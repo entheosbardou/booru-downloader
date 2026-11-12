@@ -15,6 +15,7 @@
 
 ## Data rules
 
+- Do not hard-code individual searches, posts, tag names or IDs, or similar site records into application behavior. Resolve them through the source site or use user-provided values.
 - MySQL stores values in typed columns and relationship tables. Do not add JSON blobs, executable instructions, triggers, routines, views, or generated columns to hold application behavior. The UI may accept JSON input for mappings, but persistence splits it into relational rows.
 - Before a production schema change or data migration, show the exact tables, columns, indexes, relationships, and data changes, plus backup, rollback, and verification steps to the user and wait for explicit approval. Do not import `schema.sql` into an existing populated database.
 - Removing a site archives its identity for provenance and removes runtime state, source options, and credentials. Searches, posts, and file records retain their source identity. Archived sites must not start new searches.

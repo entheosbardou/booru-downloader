@@ -1,5 +1,13 @@
 # Project status
 
+## Site search failures (November 12, 2026)
+
+- Rule34Hentai and SizeChangeBooru use their current public search pages with the existing Shimmie profiles. Downloads resolve originals from the post page on demand. The Rule34Hentai download uses the MD5 in the original link, and its headerless JPEG previews are checked before serving. A custom API path still takes precedence. No schema or profile changes are required.
+- All 23 exported queries for these two sites were checked with the updated adapter. Eight returned posts and 15 were empty. Wildcard search and page advancement were verified on both sites. The built application fetched and decoded one live preview and saved and verified one live original from each site with a fixture database.
+- E-Shuushuu resolves names and site-defined aliases through its live tag API and accepts comma-separated tag IDs. The error identifies the missing tag and requires an ID when a name is ambiguous. Cross-site search terms that have no exact match still need E-Shuushuu names or IDs.
+- FindAFox returned HTTP 404 from the saved API path and presented a CAPTCHA on its public search page. Paheal returned 100 posts each for the two reported queries when checked with the current production profile. The Danbooru profile received no original file URL for all 14 exported posts, six of which the API marked deleted.
+- Python compilation, the five Sankaku regression tests, JavaScript syntax, Compose validation, and a clean build passed. The build on `linux-docker` is `booru-downloader:site-search-live-tags` (`sha256:a8430f5513727f2c37e5bcc5cd85b4900a991c277f9d19de6360fed687aa40f1`). Production deployment and job retries are pending.
+
 ## Crawl saved searches by site (November 11, 2026)
 
 - **Crawl saved searches** queues existing searches across the library for one or more selected sites. Set the batch limit per search and choose **Resume from saved progress** or **Start from newest**. The latter resets crawl checkpoints and keeps saved results. Resume skips exhausted searches, and both modes skip pending crawls and unavailable sites. The app reports queued and skipped counts. No database migration is required.

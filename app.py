@@ -735,11 +735,18 @@ def fetch_preview(record_id):
         with build_opener(Redirects(client.valid_file_url)).open(req,timeout=12) as response:
             governor.observe(client.url,url,response.headers,api=False)
             kind = response.headers.get('Content-Type','').split(';')[0].lower()
-            if not kind.startswith('image/'):
+            untyped_rule34hentai = (not kind and client.web_post_site == 'rule34hentai.net'
+                                    and re.fullmatch(r'/_thumbs/[a-f0-9]{32}/thumb\.jpg', urlparse(response.geturl()).path)
+                                    and urlparse(response.geturl()).hostname == client.web_post_site)
+            if not kind.startswith('image/') and not untyped_rule34hentai:
                 raise ValueError('The source did not provide an image preview.')
             body = response.read(4*1024*1024+1)
             if len(body)>4*1024*1024 or not body:
                 raise ValueError('The preview is empty or too large.')
+            if untyped_rule34hentai:
+                if not body.startswith(b'\xff\xd8\xff'):
+                    raise ValueError('The source did not provide a JPEG preview.')
+                kind = 'image/jpeg'
             cache = 'no-store' if 'no-store' in response.headers.get('Cache-Control','') else 'private, max-age=300'
     except HTTPError as exc:
         governor.observe(client.url,url,exc.headers,exc.code,api=False)
@@ -1304,6 +1311,15 @@ def download_new_file(job, payload):
         post = post_value(record)
         client = get_source(db, search['source_id'], require_enabled=True)
         delay = client.download_interval or float(read_setting(db, 'delay', '2'))
+    if client.web_post_site and not post.get('file_url'):
+        respect_download_backoff(job, client)
+
+        def pace_post_lookup():
+            check_stop(job['id'])
+            pace_search(client.min_delay, client.id)
+            check_stop(job['id'])
+
+        post = client.web_original(post, pace_post_lookup)
     rating_folder = client.rating_directory(post.get('rating'))
     subdir = safe_subdir(payload.get('source_subdir', client.subdir))
     grouped = payload.get('collection_name')
@@ -1376,7 +1392,10 @@ def transfer_file(job, payload, post, client, target, algorithm, expected, delay
                 governor.before(client.url,url,api=False,interval=delay)
                 with build_opener(Redirects(client.valid_file_url)).open(req, timeout=45) as response, partial.open('xb') as out:
                     governor.observe(client.url,url,response.headers,api=False)
-                    if not response.headers.get('Content-Type', '').lower().startswith(('image/', 'video/', 'application/zip', 'application/octet-stream', 'application/x-shockwave-flash')):
+                    kind = response.headers.get('Content-Type', '').lower()
+                    verified_untyped = (not kind and verify and expected and client.web_post_site == 'rule34hentai.net'
+                                        and urlparse(response.geturl()).hostname == client.web_post_site)
+                    if not verified_untyped and not kind.startswith(('image/', 'video/', 'application/zip', 'application/octet-stream', 'application/x-shockwave-flash')):
                         raise ValueError('The site did not return an original image or supported media file.')
                     length = int(response.headers.get('Content-Length') or 0)
                     while True:

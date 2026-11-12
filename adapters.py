@@ -4,6 +4,7 @@ import json
 import re
 import time
 from http.cookies import CookieError, SimpleCookie
+from html.parser import HTMLParser
 from datetime import datetime, timezone
 import xml.etree.ElementTree as ET
 from pathlib import PurePosixPath
@@ -141,6 +142,44 @@ class NoRedirects(HTTPRedirectHandler):
         return None
 
 
+class WebPostParser(HTMLParser):
+    """Read post thumbnails and original links from the two supported sites."""
+
+    def __init__(self, site):
+        super().__init__()
+        self.site = site
+        self.anchor = None
+        self.posts = []
+        self.originals = []
+
+    def handle_starttag(self, tag, attributes):
+        attrs = dict(attributes)
+        path = urlparse(attrs.get('href') or attrs.get('src') or '').path
+        if tag == 'a':
+            post_path = '/Details/' if self.site == 'sizebooru.com' else '/post/view/'
+            match = re.fullmatch(re.escape(post_path) + r'(\d+)', path)
+            classes = (attrs.get('class') or '').split()
+            self.anchor = (match[1], attrs) if match and (
+                self.site == 'sizebooru.com' or 'shm-thumb-link' in classes
+            ) else None
+            if 'download' in attrs and path.startswith('/_images/'):
+                self.originals.append((attrs['href'], path))
+        if tag == 'img' and self.anchor:
+            pid, anchor = self.anchor
+            prefix = '/thumbs/' if self.site == 'sizebooru.com' else '/_thumbs/'
+            if path.startswith(prefix):
+                self.posts.append(dict(id=pid, tags=anchor.get('data-tags') or attrs.get('alt'),
+                                       width=anchor.get('data-width'), height=anchor.get('data-height'),
+                                       preview_url=path))
+                self.anchor = None
+        if tag in ('img', 'video', 'source', 'a') and re.fullmatch(r'/Picture/\d+', path):
+            self.originals.append((path, attrs.get('alt') or attrs.get('download') or ''))
+
+    def handle_endtag(self, tag):
+        if tag == 'a':
+            self.anchor = None
+
+
 class BooruSource:
     def __init__(self, config, refresh_sankaku=None):
         self.config = dict(config)
@@ -236,17 +275,26 @@ class BooruSource:
                     needs_credentials=self.requires_credentials and not self.has_credentials,
                     user_agent=self.user_agent, rating_labels=self.rating_labels, rating_groups=self.rating_groups,
                     rating_order=list(self.rating_labels), safe_rating='g' if self.api == 'danbooru' else 's',
-                    query_help='Use the site’s query syntax, e.g. landscape, safe' if self.api == 'philomena' else 'Use a Zerochan tag name, e.g. Landscape' if self.api == 'zerochan' else 'Use the site’s search tags or query',
+                    query_help='Use comma-separated E-Shuushuu tag names or IDs' if self.api == 'eshuushuu' else 'Use the site’s query syntax, e.g. landscape, safe' if self.api == 'philomena' else 'Use a Zerochan tag name, e.g. Landscape' if self.api == 'zerochan' else 'Use the site’s search tags or query',
                     last_test=self.config.get('last_test'), access=access_notes(self.url))
 
     def post_url(self, pid):
         pid = quote(str(pid), safe='')
         if self.post_path:
             return self.url + self.post_path + pid
+        if self.web_post_site == 'sizebooru.com':
+            return self.api_url + '/Details/' + pid
         if self.api == 'gelbooru':
             return self.url + '/index.php?' + urlencode({'page': 'post', 's': 'view', 'id': pid})
         path = '/post/show/' if self.api == 'moebooru' else '/post/view/' if self.api == 'shimmie' else '/images/' if self.api == 'philomena' else '/posts/'
         return self.url + path + str(pid)
+
+    @property
+    def web_post_site(self):
+        host = urlparse(self.api_url).hostname
+        if self.api == 'shimmie' and not self.api_path and host in ('rule34hentai.net', 'sizebooru.com'):
+            return host
+        return None
 
     @property
     def cursor_kind(self):
@@ -638,6 +686,11 @@ class BooruSource:
                 self.page_ids = [p['id'] for p in records]
             self.exhausted = self.exhausted or not self.page_ids
             return [p for p in records if self.rating_directory(p.get('rating')) in rating.split(',')]
+        if self.web_post_site:
+            tags = self.with_rating(tags, rating)
+            req = self.web_search_request(tags, offset)
+            return self._read(req, delay, before_request, retries, timeout, self.parse_web_search,
+                              parse_not_found=self.web_post_site == 'rule34hentai.net')
         if self.api == 'eshuushuu':
             if rating not in ('', 'sfw'):
                 return []
@@ -646,17 +699,23 @@ class BooruSource:
                 name = name.strip()
                 if not name or name == '*':
                     continue
-                if name.isdigit():
+                if re.fullmatch(r'[0-9]+', name):
                     ids.append(name)
                     continue
-                lookup = Request(self.api_url + '/api/v1/tags?' + urlencode({'search':name.replace('_', ' '), 'per_page':100}), headers={'User-Agent':self.user_agent})
+                title = ' '.join(name.replace('_', ' ').split())
+                lookup = Request(self.api_url + '/api/v1/tags?' + urlencode({'search':title, 'per_page':100}), headers={'User-Agent':self.user_agent})
                 response = self._read(lookup, delay, before_request, retries, timeout, json.loads)
-                candidates = response.get('tags', []) if isinstance(response, dict) else response
-                match = next((tag for tag in candidates if str(tag.get('title', '')).casefold().replace('_',' ') == name.casefold().replace('_',' ')), None)
-                if not match:
-                    raise ValueError(f'No exact tag match on {self.name}. Use comma-separated tag names or tag IDs.')
-                ids.append(str(match['tag_id']))
-            tags = ','.join(ids)
+                candidates = response.get('tags') if isinstance(response, dict) else response
+                if not isinstance(candidates, list) or any(not isinstance(tag, dict) for tag in candidates):
+                    raise ValueError('E-Shuushuu returned an unexpected tag list.')
+                matches = {str(tag.get('aliased_tag_id') or tag.get('tag_id')) for tag in candidates
+                           if ' '.join(str(tag.get('title', '')).replace('_', ' ').split()).casefold() == title.casefold()}
+                if len(matches) > 1:
+                    raise ValueError(f'{self.name} has multiple tags named "{name}". Use the intended tag ID.')
+                if not matches:
+                    raise ValueError(f'No exact tag match for "{name}" on {self.name}. Use a site tag name or tag ID.')
+                ids.extend(matches)
+            tags = ','.join(dict.fromkeys(ids))
         req = self.request(tags, cursor=cursor, offset=offset, limit=limit, rating=rating)
         try:
             records = self._read(req, delay, before_request, retries, timeout)
@@ -684,6 +743,71 @@ class BooruSource:
             if rating:
                 records = [post for post in records if self.rating_directory(post['rating']) == rating]
         return records
+
+    def web_search_request(self, tags, offset):
+        if self.web_post_site == 'sizebooru.com':
+            # Keep the page size fixed so a saved page offset stays meaningful.
+            params = dict(pageNo=offset + 1, pageSize=50)
+            if tags not in ('', '*'):
+                params['q'] = tags
+            path = '/Search' if 'q' in params else '/Home'
+            path += '?' + urlencode(params)
+        else:
+            query = quote(tags, safe='') + '/' if tags not in ('', '*') else ''
+            path = f'/post/list/{query}{offset + 1}'
+        return self.web_request(path)
+
+    def web_request(self, path):
+        url = self.api_url + path
+        return Request(url, headers=dict(self.download_headers(url), Accept='text/html'))
+
+    def parse_web_search(self, payload, status=200):
+        html = payload.decode('utf-8', 'replace')
+        if status == 404:
+            if '<title>No posts Found</title>' in html and 'No posts were found to match the search criteria' in html:
+                return []
+            raise ValueError(f'{self.name} search page returned HTTP 404.')
+        parser = WebPostParser(self.web_post_site)
+        parser.feed(html)
+        if self.web_post_site == 'sizebooru.com':
+            expected_page = '<title>Search Results - Size Booru</title>' in html or '<title>Home - Size Booru</title>' in html
+            empty_grid = re.search(r'<div class="container-fluid">\s*<div class="row">\s*</div>\s*</div>\s*<table', html)
+            if expected_page and empty_grid and not parser.posts:
+                return []
+        else:
+            expected_page = "class='shm-image-list'" in html
+        if not expected_page or not parser.posts:
+            raise ValueError(f'{self.name} did not return a recognized search page. Check site access.')
+        return [self.normalize(dict(post, preview_url=self.api_url + post['preview_url'])) for post in parser.posts]
+
+    def web_original(self, post, before_request):
+        pid = str(post['id'])
+        if not re.fullmatch(r'[0-9]+', pid):
+            raise ValueError('The site post has an invalid ID.')
+        path = ('/Details/' if self.web_post_site == 'sizebooru.com' else '/post/view/') + pid
+
+        def parse_original(payload):
+            parser = WebPostParser(self.web_post_site)
+            parser.feed(payload.decode('utf-8', 'replace'))
+            for url, filename in parser.originals:
+                parsed = urlparse(url)
+                if parsed.scheme or parsed.netloc:
+                    continue
+                metadata = {}
+                if self.web_post_site == 'sizebooru.com':
+                    if parsed.path != '/Picture/' + pid:
+                        continue
+                else:
+                    match = re.fullmatch(r'/_images/([a-f0-9]{32})/' + pid + r'(?:%20[^/]*)?\.[a-zA-Z0-9]+', parsed.path)
+                    if not match:
+                        continue
+                    metadata = dict(md5=match[1], checksum=match[1], checksum_algorithm='md5')
+                extension = PurePosixPath(filename).suffix.lstrip('.').lower()
+                if extension:
+                    return dict(post, file_url=self.api_url + parsed.path, file_ext=extension, **metadata)
+            raise ValueError(f'{self.name} did not expose an original file on the post page.')
+
+        return self._read(self.web_request(path), 0, before_request, 3, 25, parse_original)
 
     def download_headers(self, url):
         headers = {'User-Agent': self.user_agent, 'Referer': self.url+'/'}
@@ -732,7 +856,7 @@ class BooruSource:
             return self.normalize(dict(data, id=data.get('id') or post['id']))
         return self._read(req, delay, before_request, retries, timeout, detail_parser)
 
-    def _read(self, req, delay, before_request, retries, timeout, parser=None):
+    def _read(self, req, delay, before_request, retries, timeout, parser=None, *, parse_not_found=False):
         opener = build_opener(Redirects(self.valid_api_url))
         refresh = self.refresh_sankaku if self.can_refresh_sankaku else None
         if refresh and self.sankaku_token_expired(self.sankaku_token):
@@ -755,6 +879,9 @@ class BooruSource:
                 return (parser or self.parse)(payload)
             except HTTPError as exc:
                 governor.observe(self.url, req.full_url, exc.headers, exc.code)
+                if exc.code == 404 and parse_not_found:
+                    with exc:
+                        return parser(exc.read(256 * 1024), status=404)
                 if exc.code == 401 and refresh:
                     exc.close()
                     self.api_key = refresh(self.sankaku_token, timeout)
@@ -762,6 +889,9 @@ class BooruSource:
                     refresh = None
                     continue
                 if exc.code not in (429, 500, 502, 503, 504) or attempt == retries - 1:
+                    if (exc.code == 404 and self.api == 'shimmie' and not self.api_path
+                            and urlparse(self.api_url).hostname == 'findafox.net'):
+                        raise ValueError('FindAFox’s search API returns HTTP 404. Its public search page requires CAPTCHA verification.') from None
                     hint = ' Check credentials, API URL, or site access restrictions.' if exc.code in (401, 403) else ''
                     raise ValueError(f'{self.name} API returned HTTP {exc.code}.{hint}') from None
                 retry = exc.headers.get('Retry-After', '')
