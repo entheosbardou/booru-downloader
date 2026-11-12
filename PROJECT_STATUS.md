@@ -1,5 +1,10 @@
 # Project status
 
+## Rule34 Paheal XML search failures (November 12, 2026)
+
+- Paheal returned HTTP 200 with XML containing HTML entities such as `&mdash;`. The strict XML parser rejected the full page, leaving the crawl at its last saved checkpoint. The Paheal adapter now converts recognized HTML entities to XML numeric references when the initial XML parse fails. Other malformed responses still fail validation.
+- The patched parser returned 100 unique posts on each of the three live pages that the current production parser rejected. Python compilation, five Sankaku tests, JavaScript syntax, Compose validation, and focused parser checks passed. A clean build on `linux-docker` produced `booru-downloader:paheal-xml-entities` (`sha256:874ae49e9114bd970264d66e120b323501b0ae2874dd6aae68766bdde2acbb46`). Production deployment and crawl retries are pending.
+
 ## Rating selection for Rule34 Paheal, Rule34Hentai, and SizeChangeBooru (November 12, 2026)
 
 - All three sites are selectable for Sketchy, NSFW, and Any. SFW alone excludes these sites. Sketchy and NSFW use each site's default search results without assigning ratings to individual posts. Existing site profiles work without a schema change.

@@ -4,6 +4,7 @@ import json
 import re
 import time
 from http.cookies import CookieError, SimpleCookie
+from html.entities import html5
 from html.parser import HTMLParser
 from datetime import datetime, timezone
 import xml.etree.ElementTree as ET
@@ -75,6 +76,13 @@ ACCESS_NOTES = {
 }
 SAFE_SITES = {'safebooru.org','safebooru.donmai.us','konachan.net','e926.net','e-shuushuu.net'}
 ADULT_SHIMMIE_SITES = {'rule34.paheal.net', 'rule34hentai.net', 'sizechangebooru.com'}
+
+
+def paheal_xml_entity(match):
+    entity = match.group(1).decode('ascii')
+    if entity in ('amp;', 'lt;', 'gt;', 'apos;', 'quot;') or entity not in html5:
+        return match.group(0)
+    return ''.join(f'&#{ord(char)};' for char in html5[entity]).encode('ascii')
 
 def access_notes(url):
     host = urlparse(url).hostname
@@ -543,7 +551,13 @@ class BooruSource:
         payload = payload.lstrip(b'\xef\xbb\xbf \r\n\t')
         if payload.lstrip().startswith(b'<'):
             try:
-                root = ET.fromstring(payload)
+                try:
+                    root = ET.fromstring(payload)
+                except ET.ParseError:
+                    if self.api != 'shimmie' or urlparse(self.api_url).hostname != 'rule34.paheal.net':
+                        raise
+                    # Paheal sometimes emits HTML entities in XML attributes.
+                    root = ET.fromstring(re.sub(rb'&([A-Za-z][A-Za-z0-9]*;)', paheal_xml_entity, payload))
             except ET.ParseError:
                 raise ValueError('The site returned an invalid API response or access challenge instead of posts.') from None
             if root.tag == 'response' and root.get('success') == 'false':
