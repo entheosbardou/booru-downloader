@@ -112,6 +112,11 @@ def safe_subdir(value):
     return value
 
 
+def media_extension(value):
+    extension = str(value or '').lower().lstrip('.')
+    return extension if re.fullmatch(r'[a-z0-9]{1,32}', extension) else ''
+
+
 def number(value, default=0):
     try:
         return int(value)
@@ -667,8 +672,6 @@ class BooruSource:
                 if not post.get('preview_url'):
                     thumb = filename.rsplit('.',1)[0]+'.jpg'
                     post['preview_url'] = self.url+'/thumbnails/'+directory+'/thumbnail_'+quote(thumb,safe='._-')
-        if self.api == 'shimmie' and not post.get('file_ext'):
-            post['file_ext'] = PurePosixPath(str(raw.get('file_name') or '')).suffix.lstrip('.')
         value = raw.get('id')
         post['id'] = int(value) if str(value).isdigit() and len(str(value)) < 19 else str(value or '')
         for key in ('width', 'height', 'file_size', 'score'):
@@ -680,7 +683,10 @@ class BooruSource:
         post['file_url'] = self.absolute(post.get('file_url'))
         post['preview_url'] = self.absolute(post.get('preview_url'))
         post['md5'] = str(post.get('md5') or post.get('hash') or '').lower()
-        post['file_ext'] = str(post.get('file_ext') or PurePosixPath(urlparse(post['file_url']).path).suffix.lstrip('.')).lower()
+        extension = media_extension(post.get('file_ext'))
+        if not extension and self.api == 'shimmie':
+            extension = media_extension(PurePosixPath(str(raw.get('file_name') or '')).suffix)
+        post['file_ext'] = extension or media_extension(PurePosixPath(urlparse(post['file_url']).path).suffix)
         post['post_url'] = self.post_url(post['id'])
         created = raw.get('created_at') or raw.get('datetime')
         if isinstance(created, dict):

@@ -9,6 +9,7 @@ import threading
 import time
 import weakref
 import math
+from mimetypes import guess_extension
 from email.utils import parsedate_to_datetime
 from urllib.error import HTTPError
 from contextlib import contextmanager
@@ -21,7 +22,7 @@ from pymysql.err import OperationalError
 from crawler import FIELDS
 from source import (DEFAULT_SOURCE_URL, SOURCE_URL, SOURCE_NAME, SOURCE_API, FILE_HOSTS, valid_file_url,
                     POST_PATH, RATING_LABELS, SAFE_RATING, USER_AGENT, post_url, rating_directory)
-from adapters import BooruSource, PRESETS, ADAPTERS, safe_subdir, Redirects
+from adapters import BooruSource, PRESETS, ADAPTERS, safe_subdir, media_extension, Redirects
 from rate_limits import governor, Deferred
 from rate_groups import group_sources
 import tag_index
@@ -1352,6 +1353,24 @@ def download(job, payload):
         return download_new_file(job,payload)
 
 
+def paheal_original_extension(job, client, url, delay):
+    url = client.valid_file_url(url)
+    respect_download_backoff(job, client)
+    pace_search(delay, ('download', client.id))
+    check_stop(job['id'])
+    request = Request(url, headers=client.download_headers(url), method='HEAD')
+    governor.before(client.url, url, api=False, interval=delay)
+    try:
+        with build_opener(Redirects(client.valid_file_url)).open(request, timeout=25) as response:
+            governor.observe(client.url, url, response.headers, api=False)
+            return media_extension(Path(response.headers.get_filename() or '').suffix) or media_extension(
+                guess_extension(response.headers.get_content_type()))
+    except HTTPError as exc:
+        with exc:
+            governor.observe(client.url, url, exc.headers, exc.code, api=False)
+        raise
+
+
 def download_new_file(job, payload):
     check_stop(job['id'])
     with database() as db:
@@ -1387,7 +1406,9 @@ def download_new_file(job, payload):
     lengths = {'md5':32, 'sha1':40, 'sha256':64, 'sha512':128}
     if algorithm not in lengths or (expected and (len(expected) != lengths[algorithm] or any(c not in '0123456789abcdef' for c in expected))):
         raise ValueError('The site provided an invalid file checksum.')
-    ext = str(post.get('file_ext') or '').lower().lstrip('.')
+    ext = media_extension(post.get('file_ext'))
+    if not ext and post.get('file_url') and urlparse(client.url).hostname == 'rule34.paheal.net':
+        ext = paheal_original_extension(job, client, post['file_url'], delay)
     if ext not in ('jpg','jpeg','png','gif','webp','avif','bmp','tif','tiff','svg','jxl','zip','mp4','webm','swf'):
         raise ValueError('The original is unavailable or its file type is unsupported. Check the source post/account access.')
     remote = str(post['id'])

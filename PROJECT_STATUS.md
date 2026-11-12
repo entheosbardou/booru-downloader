@@ -1,5 +1,10 @@
 # Project status
 
+## Rule34 Paheal extension overflow (November 12, 2026)
+
+- Crawl job 50321 stopped at its third page because two Paheal filenames produced 43-character suffixes for `post_media.extension`, which accepts 32 characters. The adapter now validates extension candidates and leaves the extension empty when it cannot infer one. For a Paheal original with no extension, the download worker resolves it from the original response headers. No schema change is required.
+- All 100 posts from the failing live page passed through the save code with an isolated 32-character constraint. The download worker's header lookup resolved both affected originals as JPEGs. Python compilation, five Sankaku tests, JavaScript syntax, Compose validation, and the clean `booru-downloader:paheal-extension` build on `linux-docker` passed (`sha256:777e0d0a090c82289537173b5cd990338197561e577f8e52336f7705edb8128f`). Production deployment and the crawl retry are pending.
+
 ## Rule34 Paheal XML search failures (November 12, 2026)
 
 - Paheal returned HTTP 200 with XML containing HTML entities such as `&mdash;`. The strict XML parser rejected the full page, leaving the crawl at its last saved checkpoint. The Paheal adapter now converts recognized HTML entities to XML numeric references when the initial XML parse fails. Other malformed responses still fail validation.
