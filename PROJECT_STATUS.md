@@ -1,5 +1,15 @@
 # Project status
 
+## Rating selection for Rule34 Paheal, Rule34Hentai, and SizeChangeBooru (November 12, 2026)
+
+- All three sites are selectable for Sketchy, NSFW, and Any. SFW alone excludes these sites. Sketchy and NSFW use each site's default search results without assigning ratings to individual posts. Existing site profiles work without a schema change.
+- Python compilation, five Sankaku tests, JavaScript syntax, Compose validation, and a clean build on `linux-docker` passed. The image is `booru-downloader:shimmie-rating-selection` (`sha256:70cd42ede602470b7dff5d987ebd4adff1ed03cd9f1a6179bfc6b30aa8219b54`). Isolated checks exercised site picker eligibility, rating validation, and search pagination with fixture responses. Production deployment is pending.
+
+## Skip post removes downloads (November 12, 2026)
+
+- **Skip post** asks for confirmation, removes the post from saved results, and deletes its downloaded originals under the configured download root. A file linked to another post stays available to that post. The confirmation result reports deleted and shared files. Active downloads are asked to stop, and a late download job checks the post's skip status before writing.
+- An isolated MySQL test verified deletion of multiple saved copies, retention until the last shared link is removed, repeated skips, missing files, unsafe path rejection, and download queue and result cleanup. Python compilation, the five Sankaku tests, JavaScript syntax, the confirmation check, and Compose validation passed. A clean build produced `booru-downloader:skip-deletes` (`sha256:06696cc0b52873391f02b8d192b99860b218b7945a0742c84a7a9a5376af5a4a`). No schema change is required. Production deployment is pending.
+
 ## Site search failures (November 12, 2026)
 
 - Rule34Hentai and SizeChangeBooru use their current public search pages with the existing Shimmie profiles. Downloads resolve originals from the post page on demand. The Rule34Hentai download uses the MD5 in the original link, and its headerless JPEG previews are checked before serving. A custom API path still takes precedence. No schema or profile changes are required.

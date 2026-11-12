@@ -1049,10 +1049,58 @@ def failures():
     return jsonify(failures=result, total=total, page=page, total_pages=pages)
 
 
+def remove_skipped_post_files(db, record_id):
+    file_ids = db.raw_execute("""
+        SELECT DISTINCT mf.file_id FROM media_files mf JOIN post_media m ON m.id=mf.media_id
+        WHERE m.post_id=%s ORDER BY mf.file_id
+    """, (record_id,)).fetchall()
+    deleted = shared = 0
+    for (file_id,) in file_ids:
+        # Serialize with downloads that are linking another post to this file.
+        db.raw_execute('SELECT id FROM files WHERE id=%s FOR UPDATE', (file_id,)).fetchone()
+        other_post = db.raw_execute("""
+            SELECT 1 FROM media_files mf JOIN post_media m ON m.id=mf.media_id
+            WHERE mf.file_id=%s AND m.post_id<>%s LIMIT 1
+        """, (file_id, record_id)).fetchone()
+        locations = db.raw_execute("""
+            SELECT CONCAT(TRIM(TRAILING '/' FROM r.configured_path),'/',l.relative_path)
+            FROM file_locations l JOIN storage_roots r ON r.id=l.storage_root_id
+            WHERE l.file_id=%s AND l.status='present'
+        """, (file_id,)).fetchall()
+        if other_post:
+            shared += len(locations)
+        else:
+            for (stored_path,) in locations:
+                path = destination(stored_path)
+                if path == ROOT or path != Path(stored_path):
+                    raise ValueError('A saved file path is unsafe. The post could not be skipped.')
+                try:
+                    path.unlink()
+                except FileNotFoundError:
+                    pass
+                else:
+                    deleted += 1
+            db.raw_execute("""
+                UPDATE file_locations SET status='missing',last_checked_at=UTC_TIMESTAMP(6)
+                WHERE file_id=%s AND status='present'
+            """, (file_id,))
+        db.raw_execute("""
+            DELETE mf FROM media_files mf JOIN post_media m ON m.id=mf.media_id
+            WHERE mf.file_id=%s AND m.post_id=%s
+        """, (file_id, record_id))
+    return deleted, shared
+
+
 @app.post('/api/posts/<int:record_id>/skip')
 def skip_post(record_id):
-    with database() as db:
-        post = db.execute('SELECT availability_status FROM posts WHERE id=?',(record_id,)).fetchone()
+    lock = file_lock('shared-download-'+str(record_id))
+    if lock.locked():
+        with database() as db:
+            db.execute("""
+                UPDATE jobs SET cancel=1 WHERE kind='download' AND download_post_id=? AND status='running'
+            """, (record_id,))
+    with lock, database() as db:
+        post = db.execute('SELECT availability_status FROM posts WHERE id=? FOR UPDATE',(record_id,)).fetchone()
         if not post:
             abort(404)
         already_skipped = post['availability_status'] in ('empty_redirect','skipped')
@@ -1067,10 +1115,11 @@ def skip_post(record_id):
           WHERE kind='download' AND download_post_id=? AND status IN ('queued','error','stopped')""",(record_id,)).rowcount
         stopping = db.execute("""UPDATE jobs SET cancel=1,message='Post skipped by user; stopping download'
           WHERE kind='download' AND download_post_id=? AND status='running'""",(record_id,)).rowcount
+        deleted_files, shared_files = remove_skipped_post_files(db, record_id)
     WAKE.set()
     return jsonify(skipped=True,already_skipped=already_skipped,
                    removed_results=sum(row['total'] for row in linked),cleared_downloads=cleared,
-                   stopping_downloads=stopping)
+                   stopping_downloads=stopping,deleted_files=deleted_files,shared_files=shared_files)
 
 
 @app.post('/api/jobs/restart-stopped')
@@ -1285,9 +1334,11 @@ def download(job, payload):
     with file_lock('shared-download-'+str(payload['id'])):
         check_stop(job['id'])
         with database() as db:
-            scope=db.execute('SELECT p.source_id AS post_source,s.source_id AS search_source FROM posts p JOIN searches s ON s.id=? WHERE p.id=?',(job['search_id'],payload['id'])).fetchone()
+            scope=db.execute('SELECT p.source_id AS post_source,s.source_id AS search_source,p.availability_status FROM posts p JOIN searches s ON s.id=? WHERE p.id=?',(job['search_id'],payload['id'])).fetchone()
             if not scope or scope['post_source']!=scope['search_source']:
                 raise ValueError('Post and search do not belong to the same site.')
+            if scope['availability_status'] in ('empty_redirect','skipped'):
+                raise Stopped()
         path=saved_file(payload['id'])
         if path is not None:
             try:

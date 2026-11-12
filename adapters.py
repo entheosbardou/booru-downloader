@@ -74,6 +74,7 @@ ACCESS_NOTES = {
     'furbooru.org': ('Public / optional key', 'Anonymous image search is supported. An optional API key applies account filters; rating filters and account settings affect visible content.', 'https://furbooru.org/pages/api'),
 }
 SAFE_SITES = {'safebooru.org','safebooru.donmai.us','konachan.net','e926.net','e-shuushuu.net'}
+ADULT_SHIMMIE_SITES = {'rule34.paheal.net', 'rule34hentai.net', 'sizechangebooru.com'}
 
 def access_notes(url):
     host = urlparse(url).hostname
@@ -252,7 +253,14 @@ class BooruSource:
         return {'s': 'Safe', 'q': 'Questionable', 'e': 'Explicit'}
 
     @property
+    def uses_site_default_for_ratings(self):
+        host = urlparse(self.url).hostname.removeprefix('www.')
+        return self.api == 'shimmie' and host in ADULT_SHIMMIE_SITES
+
+    @property
     def rating_groups(self):
+        if self.uses_site_default_for_ratings:
+            return ['sketchy', 'nsfw']
         if not self.rating_labels:
             return []
         if self.api == 'eshuushuu':
@@ -301,13 +309,14 @@ class BooruSource:
         return 'token' if self.api == 'sankaku' else 'page' if self.api in ('zerochan', 'animepictures', 'shimmie', 'eshuushuu', 'szurubooru', 'json') else 'id'
 
     def with_rating(self, tags, rating):
-        if ',' in rating:
+        use_site_default = self.uses_site_default_for_ratings
+        if rating and (use_site_default or ',' in rating):
             groups = rating.split(',')
             if any(g not in ('sfw','sketchy','nsfw') for g in groups):
                 raise ValueError('Choose valid rating groups.')
             if not set(groups).intersection(self.rating_groups):
                 raise ValueError(f'{self.name} cannot filter the selected ratings.')
-            if re.search(r'(^|\s)(rating|safety):', tags):
+            if not use_site_default and re.search(r'(^|\s)(rating|safety):', tags):
                 raise ValueError('Use either a rating tag or the rating selector.')
             return tags
         if not rating:
@@ -677,7 +686,8 @@ class BooruSource:
         return post
 
     def fetch(self, tags, cursor=None, offset=0, limit=100, delay=2, before_request=None, retries=5, timeout=45, rating=''):
-        if ',' in rating:
+        use_site_default = self.uses_site_default_for_ratings
+        if rating and (use_site_default or ',' in rating):
             self.with_rating(tags, rating)
             self.page_ids = None
             records = self.fetch(tags, cursor=cursor, offset=offset, limit=limit, delay=delay,
@@ -685,6 +695,8 @@ class BooruSource:
             if self.page_ids is None:
                 self.page_ids = [p['id'] for p in records]
             self.exhausted = self.exhausted or not self.page_ids
+            if use_site_default:
+                return records
             return [p for p in records if self.rating_directory(p.get('rating')) in rating.split(',')]
         if self.web_post_site:
             tags = self.with_rating(tags, rating)
