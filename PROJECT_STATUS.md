@@ -1,5 +1,10 @@
 # Project status
 
+## Automatic NSFW rating for Rule34 Paheal and Rule34Hentai (November 12, 2026)
+
+- The downloader assigns NSFW to all posts from these two sites. New crawl results store the rating, and saved results, lookup, and exports apply it to older records at read time. New downloads use the NSFW subfolder. Sketchy, NSFW, and Any still use the sites' default search results.
+- Adapter and saved-record route checks passed with fixtures. Python compilation, five Sankaku tests, JavaScript syntax, Compose validation, and a clean Docker build passed. The image on `linux-docker` is `booru-downloader:rule34-auto-nsfw` (`sha256:f70a990c72b309b02c570dd3b02604254939b4fb54482fa39a35175b2302d61b`). Production deployment is pending.
+
 ## Rule34Hentai multi-tag searches (November 12, 2026)
 
 - The Rule34Hentai web adapter now encodes spaces as `+`, matching the site's search form. Previously, sending `%20` between tags could return HTTP 404. Existing profiles and saved queries use the corrected format automatically when the updated app runs.
@@ -17,7 +22,7 @@
 
 ## Rating selection for Rule34 Paheal, Rule34Hentai, and SizeChangeBooru (November 12, 2026)
 
-- All three sites are selectable for Sketchy, NSFW, and Any. SFW alone excludes these sites. Sketchy and NSFW use each site's default search results without assigning ratings to individual posts. Existing site profiles work without a schema change.
+- All three sites are selectable for Sketchy, NSFW, and Any. SFW alone excludes these sites. Sketchy and NSFW use each site's default search results. Existing site profiles work without a schema change.
 - Python compilation, five Sankaku tests, JavaScript syntax, Compose validation, and a clean build on `linux-docker` passed. The image is `booru-downloader:shimmie-rating-selection` (`sha256:70cd42ede602470b7dff5d987ebd4adff1ed03cd9f1a6179bfc6b30aa8219b54`). Isolated checks exercised site picker eligibility, rating validation, and search pagination with fixture responses. Production deployment is pending.
 
 ## Skip post removes downloads (November 12, 2026)

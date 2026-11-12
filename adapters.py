@@ -75,7 +75,13 @@ ACCESS_NOTES = {
     'furbooru.org': ('Public / optional key', 'Anonymous image search is supported. An optional API key applies account filters; rating filters and account settings affect visible content.', 'https://furbooru.org/pages/api'),
 }
 SAFE_SITES = {'safebooru.org','safebooru.donmai.us','konachan.net','e926.net','e-shuushuu.net'}
-ADULT_SHIMMIE_SITES = {'rule34.paheal.net', 'rule34hentai.net', 'sizechangebooru.com'}
+NSFW_SHIMMIE_SITES = {'rule34.paheal.net', 'rule34hentai.net'}
+ADULT_SHIMMIE_SITES = NSFW_SHIMMIE_SITES | {'sizechangebooru.com'}
+
+
+def site_post_rating(api, url):
+    host = (urlparse(url or '').hostname or '').removeprefix('www.')
+    return 'e' if api == 'shimmie' and host in NSFW_SHIMMIE_SITES else ''
 
 
 def paheal_xml_entity(match):
@@ -203,6 +209,7 @@ class BooruSource:
         self.api = config.get('api', 'moebooru')
         if self.api not in ADAPTERS:
             raise ValueError('Choose a supported API adapter.')
+        self.default_post_rating = site_post_rating(self.api, self.url)
         self.name = str(config.get('name') or urlparse(self.url).hostname).strip()[:100]
         self.username = str(config.get('username') or '')
         self.api_key = str(config.get('api_key') or '')
@@ -281,6 +288,7 @@ class BooruSource:
         return ['sfw','sketchy','nsfw']
 
     def public(self):
+        labels = {'e': 'NSFW'} if self.default_post_rating else self.rating_labels
         return dict(id=self.id, name=self.name, url=self.url, api_url=self.api_url,
                     api=self.api, api_label=ADAPTERS[self.api], api_path=self.api_path,
                     file_hosts=self.file_hosts, download_subdir=self.subdir, enabled=self.enabled,
@@ -294,8 +302,8 @@ class BooruSource:
                     query_param=self.config.get('query_param', 'q'), page_param=self.config.get('page_param', 'page'),
                     limit_param=self.config.get('limit_param', 'limit'), page_base=number(self.config.get('page_base'), 1),
                     needs_credentials=self.requires_credentials and not self.has_credentials,
-                    user_agent=self.user_agent, rating_labels=self.rating_labels, rating_groups=self.rating_groups,
-                    rating_order=list(self.rating_labels), safe_rating='g' if self.api == 'danbooru' else 's',
+                    user_agent=self.user_agent, rating_labels=labels, rating_groups=self.rating_groups,
+                    rating_order=list(labels), safe_rating='g' if self.api == 'danbooru' else 's',
                     query_help='Use comma-separated E-Shuushuu tag names or IDs' if self.api == 'eshuushuu' else 'Use the site’s query syntax, e.g. landscape, safe' if self.api == 'philomena' else 'Use a Zerochan tag name, e.g. Landscape' if self.api == 'zerochan' else 'Use the site’s search tags or query',
                     last_test=self.config.get('last_test'), access=access_notes(self.url))
 
@@ -369,6 +377,7 @@ class BooruSource:
         return tags + ' rating:' + rating
 
     def rating_directory(self, rating):
+        rating = self.default_post_rating or rating
         if self.api == 'danbooru':
             return {'g': 'sfw', 's': 'sketchy', 'q': 'sketchy', 'e': 'nsfw'}.get(rating, 'Unrated')
         return {'g': 'sfw', 's': 'sfw', 'suggestive': 'sketchy', 'q': 'sketchy', 'e': 'nsfw'}.get(rating, 'Unrated')
@@ -679,7 +688,7 @@ class BooruSource:
         tags = post.get('tags') or ''
         post['tags'] = ' '.join(tags) if isinstance(tags, list) else str(tags)
         rating = str(post.get('rating') or '?').lower()
-        post['rating'] = {'safe': 's', 'general': 'g', 'sensitive': 's', 'questionable': 'q', 'explicit': 'e'}.get(rating, rating)
+        post['rating'] = self.default_post_rating or {'safe': 's', 'general': 'g', 'sensitive': 's', 'questionable': 'q', 'explicit': 'e'}.get(rating, rating)
         post['file_url'] = self.absolute(post.get('file_url'))
         post['preview_url'] = self.absolute(post.get('preview_url'))
         post['md5'] = str(post.get('md5') or post.get('hash') or '').lower()

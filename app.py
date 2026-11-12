@@ -22,7 +22,7 @@ from pymysql.err import OperationalError
 from crawler import FIELDS
 from source import (DEFAULT_SOURCE_URL, SOURCE_URL, SOURCE_NAME, SOURCE_API, FILE_HOSTS, valid_file_url,
                     POST_PATH, RATING_LABELS, SAFE_RATING, USER_AGENT, post_url, rating_directory)
-from adapters import BooruSource, PRESETS, ADAPTERS, safe_subdir, media_extension, Redirects
+from adapters import BooruSource, PRESETS, ADAPTERS, safe_subdir, media_extension, site_post_rating, Redirects
 from rate_limits import governor, Deferred
 from rate_groups import group_sources
 import tag_index
@@ -846,6 +846,7 @@ def posts(sid=None, gid=None):
             if row['source_id'] not in clients:clients[row['source_id']]=get_source(db,row['source_id'])
             client=clients[row['source_id']]
             post=post_value(row)
+            post['rating'] = client.default_post_rating or post['rating']
             result.append(dict(post,record_id=row['record_id'],search_id=row['search_id'],source_id=client.id,site_name=client.name,
                                post_url=client.post_url(post['id']),downloaded=bool(row['downloaded']),queued=bool(row['queued'])))
         index_status = tag_index.status(db)
@@ -872,7 +873,7 @@ def saved_post_lookup():
                 LEFT JOIN posts p ON p.id=j.download_post_id WHERE j.id=?""",(int(job_text),)).fetchone()
         if remote_id:
             rows=db.execute("""SELECT p.*,p.id AS record_id,s.id AS search_id,src.name AS site_name,src.id AS source_id,
-                src.url,src.post_path,
+                src.url,src.api,src.post_path,
                 EXISTS(SELECT 1 FROM downloads d WHERE d.post_id=p.id) AS downloaded,
                 EXISTS(SELECT 1 FROM jobs j WHERE j.kind='download' AND j.status IN ('queued','running') AND j.download_post_id=p.id) AS queued
                 FROM posts p JOIN matches m ON m.post_id=p.id JOIN searches s ON s.id=m.search_id
@@ -884,6 +885,7 @@ def saved_post_lookup():
         found=[]
         for row in rows:
             value=post_value(row);base=(row['url'] or '').rstrip('/');path=row['post_path'] or '/post/show/'
+            value['rating'] = site_post_rating(row['api'], row['url']) or value['rating']
             found.append(dict(value,record_id=row['record_id'],search_id=row['search_id'],source_id=row['source_id'],
                 site_name=row['site_name'],post_url=base+path+str(value['id']),downloaded=bool(row['downloaded']),queued=bool(row['queued'])))
     return jsonify(posts=found,job=dict(job) if job else None,job_found=bool(job))
@@ -928,6 +930,7 @@ def export(fmt, sid=None, gid=None):
             for row in db.execute(f'SELECT p.* FROM post_records p JOIN matches m ON m.post_id=p.id WHERE m.search_id IN ({slots}) ORDER BY p.sort_key DESC,p.id DESC',ids):
                 client = get_source(db,row['source_id'])
                 post = post_value(row)
+                post['rating'] = client.default_post_rating or post['rating']
                 post['post_url'] = client.post_url(post['id'])
                 post['site'] = client.name
                 post['site_url'] = client.url
