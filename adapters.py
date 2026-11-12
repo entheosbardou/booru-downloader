@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 import xml.etree.ElementTree as ET
 from pathlib import PurePosixPath
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlencode, urljoin, urlparse, urlunparse, quote, parse_qsl
+from urllib.parse import urlencode, urljoin, urlparse, urlunparse, quote, quote_plus, parse_qsl
 from urllib.request import Request, HTTPRedirectHandler, build_opener
 
 from rate_limits import governor
@@ -785,7 +785,7 @@ class BooruSource:
             path = '/Search' if 'q' in params else '/Home'
             path += '?' + urlencode(params)
         else:
-            query = quote(tags, safe='') + '/' if tags not in ('', '*') else ''
+            query = quote_plus(tags) + '/' if tags not in ('', '*') else ''
             path = f'/post/list/{query}{offset + 1}'
         return self.web_request(path)
 

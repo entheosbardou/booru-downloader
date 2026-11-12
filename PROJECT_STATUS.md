@@ -1,5 +1,10 @@
 # Project status
 
+## Rule34Hentai multi-tag searches (November 12, 2026)
+
+- The Rule34Hentai web adapter now encodes spaces as `+`, matching the site's search form. Previously, sending `%20` between tags could return HTTP 404. Existing profiles and saved queries use the corrected format automatically when the updated app runs.
+- A live two-tag search returned 43 distinct posts on each of the first two pages, and all 86 had both tags. Python compilation, five Sankaku tests, JavaScript syntax, Compose validation, and a clean build passed. The image on `linux-docker` is `booru-downloader:rule34hentai-multi-tag` (`sha256:6714831c782d6ab9445c561bc866d1e80103f16cff7b73d4241705828095f623`). Production deployment is pending.
+
 ## Rule34 Paheal extension overflow (November 12, 2026)
 
 - Crawl job 50321 stopped at its third page because two Paheal filenames produced 43-character suffixes for `post_media.extension`, which accepts 32 characters. The adapter now validates extension candidates and leaves the extension empty when it cannot infer one. For a Paheal original with no extension, the download worker resolves it from the original response headers. No schema change is required.
