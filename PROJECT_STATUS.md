@@ -1,5 +1,10 @@
 # Project status
 
+## Independent job queue scrolling (November 15, 2026)
+
+- The Recent activity list scrolls independently inside Activity. The list can receive keyboard focus and retains its scroll position when jobs refresh. It shows the latest 20 jobs.
+- Desktop and narrow-viewport Edge checks passed with fixture jobs. Python compilation, JavaScript syntax, and Compose configuration passed. The local Docker engine was unavailable for the clean build. This source change is pending deployment.
+
 ## Rule34 Paheal original file types (November 15, 2026)
 
 - Paheal's API listed unsupported filename extensions for all 30 exported download failures, including `.jfif` and truncated suffixes. All 30 original URLs responded with image headers (27 JPEGs and three PNGs). The download worker now checks the original response headers when the stored Paheal extension is missing or unsupported. Existing saved posts can use the fix on retry.
