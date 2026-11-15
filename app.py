@@ -275,15 +275,24 @@ def state():
           WHERE s.deleted_at IS NULL ORDER BY s.id DESC""")]
         jobs = [dict(row) for row in db.execute('''SELECT j.id,j.kind,j.search_id,j.status,j.progress,j.total,j.message,j.cancel,s.source_id,
           CASE WHEN j.kind='download' THEN (SELECT remote_id FROM posts WHERE id=j.download_post_id) END AS post_id
-          FROM jobs j JOIN searches s ON s.id=j.search_id WHERE s.deleted_at IS NULL AND j.id IN (
-            SELECT id FROM jobs WHERE status='running'
-            UNION SELECT id FROM (SELECT recent.id FROM jobs recent JOIN searches rs ON rs.id=recent.search_id
-              WHERE recent.status!='cleared' AND rs.deleted_at IS NULL ORDER BY recent.id DESC LIMIT 100) AS recent_jobs)
-          ORDER BY (j.status='running') DESC,j.id DESC LIMIT 100''')]
+          FROM jobs j JOIN searches s ON s.id=j.search_id
+          JOIN (
+            SELECT id FROM jobs WHERE status IN ('queued','running')
+            UNION ALL
+            SELECT id FROM (
+              SELECT recent.id FROM jobs recent JOIN searches rs ON rs.id=recent.search_id
+              WHERE recent.status NOT IN ('queued','running','cleared') AND rs.deleted_at IS NULL
+              ORDER BY recent.id DESC LIMIT 20
+            ) AS recent_finished
+          ) AS visible_jobs ON visible_jobs.id=j.id
+          WHERE s.deleted_at IS NULL
+          ORDER BY CASE j.status WHEN 'running' THEN 0 WHEN 'queued' THEN 1 ELSE 2 END, j.id DESC''')]
         with PROGRESS_GUARD:
             for job in jobs:
-                if job['status']=='running' and job['id'] in TRANSFER_PROGRESS:
-                    job['message']=TRANSFER_PROGRESS[job['id']]
+                if job['status'] != 'running':
+                    break
+                if job['id'] in TRANSFER_PROGRESS:
+                    job['message'] = TRANSFER_PROGRESS[job['id']]
         for job in jobs:
             client = clients[job['source_id']]
             job['site_name'] = client.name

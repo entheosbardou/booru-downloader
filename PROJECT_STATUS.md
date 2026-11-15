@@ -2,8 +2,8 @@
 
 ## Independent job queue scrolling (November 15, 2026)
 
-- The Recent activity list scrolls independently inside Activity. The list can receive keyboard focus and retains its scroll position when jobs refresh. It shows the latest 20 jobs.
-- Desktop and narrow-viewport Edge checks passed with fixture jobs. Python compilation, JavaScript syntax, and Compose configuration passed. The local Docker engine was unavailable for the clean build. This source change is pending deployment.
+- Activity's Job queue shows every queued and running job in an independently scrolling, keyboard-focusable list. The list retains its scroll position when jobs refresh. The 20-row limit applies to the recent history shown below the queue.
+- A fixture verified that the state query returns all 150 queued jobs and the running job, even with newer history entries. Desktop and narrow-viewport Edge checks reached the oldest queued job and exercised its Stop button. Python compilation, JavaScript syntax, Compose configuration, and a clean build passed. The image on linux-docker is `booru-downloader:full-job-queue` (`sha256:0c9fb4dc278bff7a64a26aa0a762d4143622b3b49c52d1eec7dc8b6653c36c14`). Production deployment is pending.
 
 ## Rule34 Paheal original file types (November 15, 2026)
 
