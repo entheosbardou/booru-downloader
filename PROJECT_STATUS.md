@@ -1,5 +1,10 @@
 # Project status
 
+## Rule34 Paheal original file types (November 15, 2026)
+
+- Paheal's API listed unsupported filename extensions for all 30 exported download failures, including `.jfif` and truncated suffixes. All 30 original URLs responded with image headers (27 JPEGs and three PNGs). The download worker now checks the original response headers when the stored Paheal extension is missing or unsupported. Existing saved posts can use the fix on retry.
+- In an isolated container, the download worker resolved all 30 extensions and verified the source checksums for one downloaded JPEG and one PNG. Python compilation, JavaScript syntax, Compose validation, five Sankaku tests, and a clean build passed. The image on `linux-docker` is `booru-downloader:paheal-original-type` (`sha256:ec13985aafe6648c046081c2c1750edea6a9e6de4db997c501fbcbdf93c4867a`). Production deployment and job retries are pending.
+
 ## Automatic NSFW rating for Rule34 Paheal and Rule34Hentai (November 12, 2026)
 
 - The downloader assigns NSFW to all posts from these two sites. New crawl results store the rating, and saved results, lookup, and exports apply it to older records at read time. New downloads use the NSFW subfolder. Sketchy, NSFW, and Any still use the sites' default search results.

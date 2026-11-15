@@ -41,6 +41,10 @@ WAKE = threading.Event()
 SEARCH_WORKERS = 3
 DOWNLOAD_WORKERS = 10
 DOWNLOADS_PER_SITE = 5
+DOWNLOAD_EXTENSIONS = frozenset({
+    'jpg', 'jpeg', 'png', 'gif', 'webp', 'avif', 'bmp', 'tif', 'tiff', 'svg',
+    'jxl', 'zip', 'mp4', 'webm', 'swf',
+})
 PACING_GUARD = threading.Lock()
 PACING = {}
 FILE_GUARD = threading.Lock()
@@ -1366,8 +1370,10 @@ def paheal_original_extension(job, client, url, delay):
     try:
         with build_opener(Redirects(client.valid_file_url)).open(request, timeout=25) as response:
             governor.observe(client.url, url, response.headers, api=False)
-            return media_extension(Path(response.headers.get_filename() or '').suffix) or media_extension(
-                guess_extension(response.headers.get_content_type()))
+            extension = media_extension(Path(response.headers.get_filename() or '').suffix)
+            if extension in DOWNLOAD_EXTENSIONS:
+                return extension
+            return media_extension(guess_extension(response.headers.get_content_type()))
     except HTTPError as exc:
         with exc:
             governor.observe(client.url, url, exc.headers, exc.code, api=False)
@@ -1410,9 +1416,9 @@ def download_new_file(job, payload):
     if algorithm not in lengths or (expected and (len(expected) != lengths[algorithm] or any(c not in '0123456789abcdef' for c in expected))):
         raise ValueError('The site provided an invalid file checksum.')
     ext = media_extension(post.get('file_ext'))
-    if not ext and post.get('file_url') and urlparse(client.url).hostname == 'rule34.paheal.net':
+    if ext not in DOWNLOAD_EXTENSIONS and post.get('file_url') and urlparse(client.url).hostname == 'rule34.paheal.net':
         ext = paheal_original_extension(job, client, post['file_url'], delay)
-    if ext not in ('jpg','jpeg','png','gif','webp','avif','bmp','tif','tiff','svg','jxl','zip','mp4','webm','swf'):
+    if ext not in DOWNLOAD_EXTENSIONS:
         raise ValueError('The original is unavailable or its file type is unsupported. Check the source post/account access.')
     remote = str(post['id'])
     if not re.fullmatch(r'[A-Za-z0-9_-]{1,128}', remote):
