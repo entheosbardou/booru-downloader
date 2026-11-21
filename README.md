@@ -76,3 +76,15 @@ Put the app user's password alone in the host `mysql-password` file, put the iss
 - `test_relational.py`: relational storage tests from the live image
 
 `.env`, credentials, secrets, downloads, and database dumps are ignored by Git and excluded from the image build context.
+
+## Data loading modules
+
+The browser requests the saved library, site configuration, Activity, and storage availability independently. Library and saved-post reads do not depend on credential files or NAS availability. One unavailable site is reported separately when starting or resuming a batch search. Existing API clients can still use the combined `/api/state` response.
+
+- `state_api.py`: library, sites, Activity, and storage read endpoints.
+- `browse_api.py`: paged saved results and visible download status.
+- `media_api.py`: bounded remote preview requests and signed-preview renewal.
+- `search_sites.py`: independent site readiness checks for batch searches.
+- `static/api.js`, `static/browse.js`, and `static/media.js`: request transport, saved-result navigation, and preview scheduling.
+
+Run the isolated regression checks with `python -m unittest test_loading test_sankaku -v` and `node scripts/test_loading.js`. They use fixtures and do not need production credentials. `test_loading.py` injects its HTTP/JSON boundary and uses in-memory SQL fixtures for browsing; these checks do not replace Flask/MySQL integration or a deployed performance check. Keep `test_relational.py` restricted to a configured synthetic MySQL test environment.

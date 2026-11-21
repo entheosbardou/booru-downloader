@@ -24,9 +24,10 @@ from source import (DEFAULT_SOURCE_URL, SOURCE_URL, SOURCE_NAME, SOURCE_API, FIL
                     POST_PATH, RATING_LABELS, SAFE_RATING, USER_AGENT, post_url, rating_directory)
 from adapters import BooruSource, PRESETS, ADAPTERS, safe_subdir, media_extension, site_post_rating, Redirects
 from rate_limits import governor, Deferred
-from rate_groups import group_sources
+from rate_groups import group_sources, group
 import tag_index
 import purge_search
+from search_sites import prepare_sites
 from relational import post_value, save_sankaku_session
 from library_groups import query_key, register_collection, shared_folder, migrate_library_groups
 from thumbnail_cache import cached_path, generate_isolated as generate_thumbnail, valid_original
@@ -51,7 +52,6 @@ FILE_GUARD = threading.Lock()
 FILE_LOCKS = weakref.WeakValueDictionary()
 PROGRESS_GUARD = threading.Lock()
 TRANSFER_PROGRESS = {}
-PREVIEW_SLOTS = threading.BoundedSemaphore(2)
 PURGE_DIR = DATA / 'purge-queue'
 
 
@@ -111,17 +111,6 @@ def create_collection(db, tags, rating, created, deleted=None):
 
 
 
-def fast_page_query(ids, sort, limit, offset):
-    field = {'post_newest':'post_sort','post_oldest':'post_sort','added_newest':'added_key','added_oldest':'added_key','score':'score','resolution':'pixels'}[sort]
-    direction = 'ASC' if sort in ('post_oldest','added_oldest') else 'DESC'
-    order = field+' '+direction+('' if field=='added_key' else ',post_id '+direction+',added_key '+direction)
-    # Each site contributes at most the requested window, then merge tiny lists.
-    pieces = [f'SELECT * FROM (SELECT post_id,search_id,added_key,{field} AS sort_value FROM result_order INDEXED BY result_order_{field} WHERE search_id=? ORDER BY {order} LIMIT ?) AS site_{i}' for i,_ in enumerate(ids)]
-    sql = 'SELECT * FROM ('+' UNION ALL '.join(pieces)+') AS site_windows ORDER BY sort_value '+direction+',post_id '+direction+',added_key '+direction+' LIMIT ? OFFSET ?'
-    params = [value for sid in ids for value in (sid,limit+offset)]
-    return sql,params+[limit,offset]
-
-
 from mysql_store import startup
 startup()
 
@@ -131,20 +120,30 @@ def get_source(db, source_id, require_enabled=False):
     if not row:
         raise ValueError('Site profile not found.')
     client = source_client(db,row)
+    if client.config.get('credential_error'):
+        raise ValueError(client.config['credential_error'])
     if require_enabled and not client.enabled:
         raise ValueError('This site is disabled. Enable it under Sites first.')
     return client
 
 
-def source_client(db,row):
+def display_source(db, source_id):
+    """Saved-result display needs site metadata, never credentials or API pacing."""
+    row = db.execute('SELECT * FROM sources WHERE id=?',(source_id,)).fetchone()
+    if not row:
+        raise ValueError('Site profile not found.')
+    return BooruSource(dict(row))
+
+
+def source_client(db,row,config=None,peers=None):
     source_id = row['id']
     client = BooruSource(
-        dict(db.source_config(source_id), id=source_id, name=row['name'], url=row['url'],
+        dict(db.source_config(source_id) if config is None else config, id=source_id, name=row['name'], url=row['url'],
              api=row['api'], enabled=bool(row['enabled']) and row['deleted_at'] is None),
         refresh_sankaku=lambda rejected, timeout: refresh_sankaku_session(source_id, rejected, timeout),
     )
     client.selected_min_delay = client.min_delay
-    client.min_delay = max([client.min_delay] + [float(delay) for _,delay in group_sources(db,row['id']) if delay is not None])
+    client.min_delay = max([client.min_delay] + [float(delay) for _,delay in (group_sources(db,row['id']) if peers is None else peers) if delay is not None])
     return client
 
 
@@ -259,74 +258,6 @@ def health():
     with database() as db:
         db.execute('SELECT 1').fetchone()
     return jsonify(ok=True)
-
-
-@app.get('/api/state')
-def state():
-    with database() as db:
-        clients = {row['id']: source_client(db,row) for row in db.execute('SELECT * FROM sources ORDER BY id')}
-        searches = [dict(row) for row in db.execute("""WITH pending AS (
-          SELECT j.search_id,count(DISTINCT j.download_post_id) AS total FROM jobs j
-          WHERE j.kind='download' AND j.status IN ('queued','running')
-          AND EXISTS(SELECT 1 FROM matches m WHERE m.search_id=j.search_id AND m.post_id=j.download_post_id)
-          GROUP BY j.search_id)
-          SELECT s.*,COALESCE(c.total,0) AS count,max(0,COALESCE(c.total,0)-COALESCE(p.total,0)) AS available
-          FROM searches s LEFT JOIN search_counts c ON c.search_id=s.id LEFT JOIN pending p ON p.search_id=s.id
-          WHERE s.deleted_at IS NULL ORDER BY s.id DESC""")]
-        jobs = [dict(row) for row in db.execute('''SELECT j.id,j.kind,j.search_id,j.status,j.progress,j.total,j.message,j.cancel,s.source_id,
-          CASE WHEN j.kind='download' THEN (SELECT remote_id FROM posts WHERE id=j.download_post_id) END AS post_id
-          FROM jobs j JOIN searches s ON s.id=j.search_id
-          JOIN (
-            SELECT id FROM jobs WHERE status IN ('queued','running')
-            UNION ALL
-            SELECT id FROM (
-              SELECT recent.id FROM jobs recent JOIN searches rs ON rs.id=recent.search_id
-              WHERE recent.status NOT IN ('queued','running','cleared') AND rs.deleted_at IS NULL
-              ORDER BY recent.id DESC LIMIT 20
-            ) AS recent_finished
-          ) AS visible_jobs ON visible_jobs.id=j.id
-          WHERE s.deleted_at IS NULL
-          ORDER BY CASE j.status WHEN 'running' THEN 0 WHEN 'queued' THEN 1 ELSE 2 END, j.id DESC''')]
-        with PROGRESS_GUARD:
-            for job in jobs:
-                if job['status'] != 'running':
-                    break
-                if job['id'] in TRANSFER_PROGRESS:
-                    job['message'] = TRANSFER_PROGRESS[job['id']]
-        for job in jobs:
-            client = clients[job['source_id']]
-            job['site_name'] = client.name
-            job['post_url'] = client.post_url(job['post_id']) if job['post_id'] else None
-        latest_crawls = {row['search_id']:row for row in db.execute("SELECT j.search_id,j.status,j.message FROM jobs j JOIN (SELECT search_id,max(id) AS id FROM jobs WHERE kind='crawl' GROUP BY search_id) latest ON latest.id=j.id")}
-        busy_crawls = {row[0] for row in db.execute("SELECT DISTINCT search_id FROM jobs WHERE kind='crawl' AND status IN ('queued','running')")}
-        for search in searches:
-            search['display_name'] = search_display_name(search)
-            search['site_name'] = clients[search['source_id']].name
-            recent = latest_crawls.get(search['id'])
-            search['last_crawl'] = dict(recent) if recent else None
-            search['busy'] = search['id'] in busy_crawls
-            search['enabled'] = clients[search['source_id']].enabled
-        collections = []
-        for parent in db.execute('SELECT * FROM collections WHERE deleted_at IS NULL ORDER BY id DESC'):
-            children = [child for child in searches if child['collection_id'] == parent['id']]
-            if not children:
-                continue
-            collections.append(dict(parent, display_name=search_display_name(parent), folder_name=shared_folder(db,parent), children=[child['id'] for child in children],
-                                    count=sum(child['count'] for child in children), available=sum(child['available'] for child in children),
-                                    complete=all(child['complete'] for child in children), busy=any(child['busy'] for child in children),
-                                    exhausted=sum(bool(child['complete']) for child in children)))
-        revision = list(db.execute("SELECT (SELECT count(*) FROM downloads), (SELECT max(completed) FROM downloads), count(*), sum(CASE WHEN kind='download' AND status IN ('queued','running') THEN 1 ELSE 0 END) FROM jobs").fetchone())
-        activity = {row['status']: row['count'] for row in db.execute('''SELECT status,count(*) AS count
-          FROM jobs WHERE status!='cleared' AND search_id IN (SELECT id FROM searches WHERE deleted_at IS NULL) GROUP BY status''')}
-        configured_default = read_setting(db, 'default_source_id', '')
-        default_id = int(configured_default) if configured_default.isdigit() and int(configured_default) in clients else next(iter(clients), None)
-        return jsonify(source=clients[default_id].public() if default_id is not None else None, sources=[client.public() for client in clients.values() if not db.execute('SELECT deleted_at FROM sources WHERE id=?',(client.id,)).fetchone()[0]],
-                       archived_sources=[client.public() for client in clients.values() if db.execute('SELECT deleted_at FROM sources WHERE id=?',(client.id,)).fetchone()[0]],
-                       default_source_id=default_id, adapters=ADAPTERS,
-                       tag_index=tag_index.status(db), searches=searches, collections=collections, jobs=jobs, activity=activity, download_revision=revision, settings={
-            'default_path': read_setting(db, 'default_path'),
-            'download_root': str(ROOT), 'root_available': ROOT.is_dir(),
-            'delay': float(read_setting(db, 'delay', '2'))})
 
 
 @app.post('/api/sources')
@@ -502,7 +433,6 @@ def new_search():
         raise ValueError('ID and ordering operators are reserved for resumable searches.')
     batches = positive(body.get('batches', 10), 1000)
     with database() as db:
-        db.execute('BEGIN IMMEDIATE')
         source_ids = body['source_ids'] if 'source_ids' in body else [body.get('source_id') or int(read_setting(db, 'default_source_id', '1'))]
         if not isinstance(source_ids, list) or not source_ids or len(source_ids) > 100 or any(type(i) is not int for i in source_ids):
             raise ValueError('Choose one or more sites.')
@@ -516,13 +446,12 @@ def new_search():
             rating = str(body.get('rating') or '')
             if rating not in ('', 'sfw', 'sketchy', 'nsfw'):
                 raise ValueError('Choose a valid rating group.')
-        for source_id in source_ids:
-            client = get_source(db, source_id, require_enabled=True)
-            if client.api == 'unconfigured':
-                raise ValueError(f'{client.name} needs an adapter configured under Sites.')
-            if client.requires_credentials and not client.has_credentials:
-                raise ValueError(f'{client.name} needs credentials under Sites first.')
-            client.with_rating(tags, rating)
+        clients,unavailable=prepare_sites(db,source_ids,get_source,tags=tags,rating=rating)
+        skipped=[dict(source_id=sid,site=clients[sid].name,reason=reason) for sid,reason in unavailable.items()]
+        source_ids=[sid for sid in source_ids if sid not in unavailable]
+        if not source_ids:
+            raise ValueError('No selected sites are ready: '+ '; '.join(item['site']+': '+item['reason'] for item in skipped))
+        db.execute('BEGIN IMMEDIATE')
         gid = create_collection(db, tags, rating, time.time())
         searches, jobs = [], []
         parent = db.execute('SELECT * FROM collections WHERE id=?',(gid,)).fetchone()
@@ -540,7 +469,7 @@ def new_search():
                              (parent['tags'], source_id, rating, time.time(), gid)).lastrowid
             jobs.append(add_job(db, 'crawl', sid, {'batches': batches}, batches))
             searches.append(sid)
-    return jsonify(id=searches[0], collection_id=gid, ids=searches, jobs=jobs)
+    return jsonify(id=searches[0], collection_id=gid, ids=searches, jobs=jobs, skipped=skipped)
 
 
 def scoped_searches(db, sid=None, gid=None, include_deleted=False):
@@ -581,8 +510,7 @@ def resume(sid=None, gid=None):
     with database() as db:
         db.execute('BEGIN IMMEDIATE')
         searches = scoped_searches(db, sid, gid)
-        clients = {source_id: get_source(db, source_id) for source_id in {s['source_id'] for s in searches}}
-        unavailable = {source_id: 'disabled' for source_id, client in clients.items() if not client.enabled}
+        clients,unavailable=prepare_sites(db,{s['source_id'] for s in searches},get_source)
         jobs, skipped = queue_saved_crawls(db, searches, clients, batches, body.get('restart'), unavailable)
     if jobs:
         WAKE.set()
@@ -609,15 +537,7 @@ def crawl_saved_searches_by_site():
     placeholders = ','.join('?' for _ in source_ids)
     with database() as db:
         db.execute('BEGIN IMMEDIATE')
-        clients = {source_id: get_source(db, source_id) for source_id in source_ids}
-        unavailable = {}
-        for source_id, client in clients.items():
-            if not client.enabled:
-                unavailable[source_id] = 'disabled'
-            elif client.api == 'unconfigured':
-                unavailable[source_id] = 'needs setup'
-            elif client.requires_credentials and not client.has_credentials:
-                unavailable[source_id] = 'needs credentials'
+        clients,unavailable=prepare_sites(db,source_ids,get_source)
         searches = db.execute(f'''SELECT s.id,s.source_id,s.complete
           FROM searches s JOIN collections c ON c.id=s.collection_id
           WHERE s.source_id IN ({placeholders}) AND s.deleted_at IS NULL AND c.deleted_at IS NULL
@@ -709,7 +629,7 @@ def refresh_expiring_media(record_id, client, post, field, force=False):
         with database() as db:
             row = db.execute('SELECT * FROM post_records WHERE id=?',(record_id,)).fetchone()
             cached = post_value(row)
-        if not force and not expired(cached.get(field)):
+        if (not force or cached.get(field) != post.get(field)) and not expired(cached.get(field)):
             return cached
         lookup = 'md5:'+post['md5'] if re.fullmatch(r'[a-fA-F0-9]{32}',post.get('md5') or '') else 'id_range:'+str(post['id'])
         fresh = client.fetch(lookup, limit=1, delay=0, retries=1, timeout=20,
@@ -721,152 +641,6 @@ def refresh_expiring_media(record_id, client, post, field, force=False):
         with database() as db:
             db.save_post(cached,client.id,record_id=record_id)
         return cached
-
-
-@app.get('/api/posts/<int:record_id>/preview')
-def proxy_preview(record_id):
-    if not PREVIEW_SLOTS.acquire(blocking=False):
-        return Response(status=503,headers={'Retry-After':'1','X-Preview-Busy':'1','Cache-Control':'no-store'})
-    try:
-        return fetch_preview(record_id)
-    finally:
-        PREVIEW_SLOTS.release()
-
-
-def fetch_preview(record_id):
-    with database() as db:
-        record = db.execute('SELECT * FROM post_records WHERE id=?',(record_id,)).fetchone()
-        if not record:
-            abort(404)
-        client = get_source(db,record['source_id'])
-        post = post_value(record)
-        media_interval = client.download_interval or float(read_setting(db, 'delay', '2'))
-    post = refresh_expiring_media(record_id, client, post, 'preview_url')
-    url = client.valid_file_url(client.absolute(post.get('preview_url') or ''))
-    req = Request(url,headers=client.preview_headers(url))
-    governor.before(client.url,url,api=False,interval=media_interval)
-    try:
-        with build_opener(Redirects(client.valid_file_url)).open(req,timeout=12) as response:
-            governor.observe(client.url,url,response.headers,api=False)
-            kind = response.headers.get('Content-Type','').split(';')[0].lower()
-            untyped_rule34hentai = (not kind and client.web_post_site == 'rule34hentai.net'
-                                    and re.fullmatch(r'/_thumbs/[a-f0-9]{32}/thumb\.jpg', urlparse(response.geturl()).path)
-                                    and urlparse(response.geturl()).hostname == client.web_post_site)
-            if not kind.startswith('image/') and not untyped_rule34hentai:
-                raise ValueError('The source did not provide an image preview.')
-            body = response.read(4*1024*1024+1)
-            if len(body)>4*1024*1024 or not body:
-                raise ValueError('The preview is empty or too large.')
-            if untyped_rule34hentai:
-                if not body.startswith(b'\xff\xd8\xff'):
-                    raise ValueError('The source did not provide a JPEG preview.')
-                kind = 'image/jpeg'
-            cache = 'no-store' if 'no-store' in response.headers.get('Cache-Control','') else 'private, max-age=300'
-    except HTTPError as exc:
-        governor.observe(client.url,url,exc.headers,exc.code,api=False)
-        raise ValueError('The source preview is currently unavailable.') from None
-    except OSError:
-        raise ValueError('The source preview is currently unavailable.') from None
-    return Response(body,content_type=kind,headers={'Cache-Control':cache,'X-Content-Type-Options':'nosniff'})
-
-
-@app.get('/api/collections/<int:gid>/posts')
-@app.get('/api/searches/<int:sid>/posts')
-def posts(sid=None, gid=None):
-    page = positive(request.args.get('page', 1), 1000000)
-    per_page = positive(request.args.get('per_page', 48), 500)
-    chunk_size = min(per_page,positive(request.args.get('chunk_size',per_page),500))
-    chunk_offset = int(request.args.get('chunk_offset',0))
-    if not 0 <= chunk_offset < per_page:
-        raise ValueError('Choose a valid page chunk offset.')
-    term = request.args.get('filter', '').strip()
-    lookup_mode='tags'
-    lookup_value=term
-    if term[:3].casefold()=='id:':
-        lookup_mode='remote_id';lookup_value=term[3:].strip()
-    elif term[:4].casefold()=='job:':
-        lookup_mode='job';lookup_value=term[4:].strip()
-    orders = {
-        'post_newest': ('p.sort_key','DESC'),
-        'post_oldest': ('p.sort_key','ASC'),
-        'added_newest': ('m.rowid','DESC'),
-        'added_oldest': ('m.rowid','ASC'),
-        'score': ("COALESCE(p.score,0)",'DESC'),
-        'resolution': ("COALESCE(p.width,0)*COALESCE(p.height,0)",'DESC'),
-    }
-    sort = request.args.get('sort','post_newest')
-    if sort not in orders:
-        raise ValueError('Choose a supported result sort order.')
-    expression,direction = orders[sort]
-    with database() as db:
-        searches = scoped_searches(db,sid,gid)
-        ids = [row['id'] for row in searches]
-        slots = ','.join('?' for _ in ids)
-        where = f"m.search_id IN ({slots})"
-        params = list(ids)
-        lookup_job=None
-        if lookup_mode=='remote_id':
-            filtered_sql='''SELECT ro.* FROM result_order ro JOIN posts p ON p.id=ro.post_id
-                WHERE ro.search_id IN ('''+slots+') AND p.remote_id=?'
-            filtered_params=[*ids,lookup_value]
-            total=db.execute('SELECT count(*) FROM ('+filtered_sql+') AS filtered',filtered_params).fetchone()[0]
-        elif lookup_mode=='job':
-            if not re.fullmatch(r'[0-9]{1,19}',lookup_value):
-                raise ValueError('Use job: followed by a download job number.')
-            lookup_job=db.execute("""SELECT j.id,j.kind,j.status,j.message,j.created,j.search_id,j.download_post_id,
-                s.tags,src.name AS site_name,p.remote_id,p.post_url FROM jobs j
-                JOIN searches s ON s.id=j.search_id JOIN sources src ON src.id=s.source_id
-                LEFT JOIN posts p ON p.id=j.download_post_id
-                WHERE j.id=? AND j.kind='download' AND j.search_id IN ("""+slots+")",(int(lookup_value),*ids)).fetchone()
-            if lookup_job and lookup_job['download_post_id']:
-                filtered_sql='SELECT * FROM result_order WHERE search_id=? AND post_id=?'
-                filtered_params=[lookup_job['search_id'],lookup_job['download_post_id']]
-            else:
-                filtered_sql='SELECT * FROM result_order WHERE 1=0'
-                filtered_params=[]
-            total=db.execute('SELECT count(*) FROM ('+filtered_sql+') AS filtered',filtered_params).fetchone()[0]
-        elif term:
-            filtered_sql, filtered_params = tag_index.filter_query(db,ids,term)
-            total = db.execute('SELECT count(*) FROM ('+filtered_sql+') AS filtered',filtered_params).fetchone()[0]
-        elif not term:
-            total = db.execute('SELECT COALESCE(sum(total),0) FROM search_counts WHERE search_id IN ('+slots+')',ids).fetchone()[0]
-        total_pages = max(1, (total+per_page-1)//per_page)
-        page = min(page,total_pages)
-        parent = db.execute('SELECT tags,folder_name FROM collections WHERE id=?',(searches[0]['collection_id'],)).fetchone()
-        if sort.startswith('added_') and not term:
-            page_from = 'matches m'
-        else:
-            cover = ' INDEXED BY posts_sort_cover' if sort.startswith('post_') and not term else ''
-            page_from = 'matches m JOIN posts p'+cover+' ON p.id=m.post_id'
-        page_limit = min(chunk_size,per_page-chunk_offset)
-        page_offset = (page-1)*per_page+chunk_offset
-        if not term:
-            page_sql,page_params = fast_page_query(ids,sort,page_limit,page_offset)
-        else:
-            field = {'post_newest':'post_sort','post_oldest':'post_sort','added_newest':'added_key','added_oldest':'added_key','score':'score','resolution':'pixels'}[sort]
-            page_sql = f"SELECT post_id,search_id,added_key,{field} AS sort_value FROM ({filtered_sql}) AS filtered ORDER BY sort_value {direction},post_id {direction},added_key {direction} LIMIT ? OFFSET ?"
-            page_params = [*filtered_params,page_limit,page_offset]
-        rows = db.execute(f"""WITH page AS ({page_sql})
-          SELECT p.*,p.id AS record_id,page.search_id,
-          EXISTS(SELECT 1 FROM downloads d WHERE d.post_id=p.id) AS downloaded,
-          EXISTS(SELECT 1 FROM jobs j WHERE j.kind='download' AND j.status IN ('queued','running') AND j.download_post_id=p.id) AS queued
-          FROM page JOIN post_records p ON p.id=page.post_id
-          ORDER BY page.sort_value {direction},page.post_id {direction},page.added_key {direction}""",
-          page_params).fetchall()
-        result=[]
-        clients={}
-        for row in rows:
-            if row['source_id'] not in clients:clients[row['source_id']]=get_source(db,row['source_id'])
-            client=clients[row['source_id']]
-            post=post_value(row)
-            post['rating'] = client.default_post_rating or post['rating']
-            result.append(dict(post,record_id=row['record_id'],search_id=row['search_id'],source_id=client.id,site_name=client.name,
-                               post_url=client.post_url(post['id']),downloaded=bool(row['downloaded']),queued=bool(row['queued'])))
-        index_status = tag_index.status(db)
-    job_value=dict(lookup_job) if lookup_job else None
-    return jsonify(tag_index=index_status, posts=result,page=page,per_page=per_page,total=total,total_pages=total_pages,job=job_value,
-                   page_length=min(per_page,max(0,total-(page-1)*per_page)),
-                   more_on_page=chunk_offset+len(result)<min(per_page,max(0,total-(page-1)*per_page)))
 
 
 @app.get('/api/saved-posts/lookup')
@@ -887,7 +661,7 @@ def saved_post_lookup():
         if remote_id:
             rows=db.execute("""SELECT p.*,p.id AS record_id,s.id AS search_id,src.name AS site_name,src.id AS source_id,
                 src.url,src.api,src.post_path,
-                EXISTS(SELECT 1 FROM downloads d WHERE d.post_id=p.id) AS downloaded,
+                EXISTS(SELECT 1 FROM post_media saved_media JOIN media_files saved_link ON saved_link.media_id=saved_media.id JOIN file_locations saved_location ON saved_location.file_id=saved_link.file_id WHERE saved_media.post_id=p.id AND saved_location.status='present') AS downloaded,
                 EXISTS(SELECT 1 FROM jobs j WHERE j.kind='download' AND j.status IN ('queued','running') AND j.download_post_id=p.id) AS queued
                 FROM posts p JOIN matches m ON m.post_id=p.id JOIN searches s ON s.id=m.search_id
                 JOIN sources src ON src.id=p.source_id JOIN collections c ON c.id=s.collection_id
@@ -902,30 +676,6 @@ def saved_post_lookup():
             found.append(dict(value,record_id=row['record_id'],search_id=row['search_id'],source_id=row['source_id'],
                 site_name=row['site_name'],post_url=base+path+str(value['id']),downloaded=bool(row['downloaded']),queued=bool(row['queued'])))
     return jsonify(posts=found,job=dict(job) if job else None,job_found=bool(job))
-
-
-@app.post('/api/collections/<int:gid>/posts/status')
-@app.post('/api/searches/<int:sid>/posts/status')
-def visible_post_status(sid=None,gid=None):
-    ids = request.get_json().get('ids')
-    if not isinstance(ids,list) or len(ids)>500 or any(type(i) is not int for i in ids):
-        raise ValueError('Choose up to 500 visible posts.')
-    with database() as db:
-        searches = scoped_searches(db,sid,gid)
-        if not ids:
-            return jsonify(posts=[])
-        search_ids = [s['id'] for s in searches]
-        parent = db.execute('SELECT tags,folder_name FROM collections WHERE id=?',(searches[0]['collection_id'],)).fetchone()
-        root = '/'+shared_folder(db,parent)+'/'
-        legacy = '/'+search_folder(0,searches[0]['tags'])+'/'
-        rows = db.execute("""SELECT p.id AS record_id,
-          EXISTS(SELECT 1 FROM downloads d WHERE d.post_id=p.id) AS downloaded,
-          EXISTS(SELECT 1 FROM jobs j WHERE j.kind='download'
-            AND j.status IN ('queued','running') AND j.download_post_id=p.id) AS queued
-          FROM posts p JOIN matches m ON m.post_id=p.id WHERE m.search_id IN ("""+
-          ','.join('?' for _ in search_ids)+') AND p.id IN ('+','.join('?' for _ in ids)+')',
-          (*search_ids,*ids)).fetchall()
-    return jsonify(posts=[dict(record_id=r['record_id'],downloaded=bool(r['downloaded']),queued=bool(r['queued'])) for r in rows])
 
 
 @app.get('/api/collections/<int:gid>/export.<fmt>')
@@ -1059,8 +809,11 @@ def failures():
           ORDER BY j.id DESC"""
         rows = db.execute(query if export_all else query + ' LIMIT ? OFFSET ?', () if export_all else (size, (page-1)*size)).fetchall()
         result = []
+        clients = {}
         for row in rows:
-            client = get_source(db, row['source_id'])
+            source_id=row['source_id']
+            if source_id not in clients:clients[source_id]=display_source(db,source_id)
+            client=clients[source_id]
             result.append(dict(row, site_name=client.name, site_api=client.api,
                                post_url=client.post_url(row['post_id']) if row['post_id'] else None))
     return jsonify(failures=result, total=total, page=page, total_pages=pages)
@@ -1652,6 +1405,18 @@ def worker(kind):
         except Exception as exc:
             app.logger.exception('Queue worker error: %s', exc)
             time.sleep(3)
+
+
+from media_api import register_media_routes
+register_media_routes(app, database=database, get_source=get_source,
+                      read_setting=read_setting, refresh_expiring_media=refresh_expiring_media)
+from browse_api import register_browse_routes
+register_browse_routes(app, database=database, scoped_searches=scoped_searches,
+                       get_source=display_source, positive=positive)
+from state_api import register_state_routes
+register_state_routes(app, database=database, source_client=source_client,
+                      search_display_name=search_display_name, read_setting=read_setting,
+                      root=ROOT, progress_guard=PROGRESS_GUARD, transfer_progress=TRANSFER_PROGRESS)
 
 
 if os.environ.get('DISABLE_WORKER') != '1':

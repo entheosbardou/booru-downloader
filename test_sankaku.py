@@ -83,15 +83,15 @@ class SankakuTests(unittest.TestCase):
             client.exchange_sankaku_token(10)
 
     def test_rotated_pair_is_loaded_from_the_current_credential_directory(self):
-        db = Mock()
-        db.raw_execute.side_effect = [
-            Mock(description=[('api',), ('credential_ref',)], fetchone=Mock(
-                return_value=('sankaku', 'source-1-test'))),
+        db = Relational()
+        db.raw_execute = Mock(side_effect = [
+            Mock(description=[('id',), ('api',), ('credential_ref',)], fetchall=Mock(
+                return_value=[(1, 'sankaku', 'source-1-test')])),
             Mock(fetchall=Mock(return_value=[])),
             Mock(fetchall=Mock(return_value=[])),
             Mock(fetchall=Mock(return_value=[])),
-            Mock(fetchone=Mock(return_value=None)),
-        ]
+            Mock(fetchall=Mock(return_value=[])),
+        ])
         with TemporaryDirectory() as root, patch.dict(os.environ, {'BOORU_CREDENTIAL_DIR': root}):
             path = Path(root, 'source-1-test')
             path.mkdir()

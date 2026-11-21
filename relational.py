@@ -69,41 +69,71 @@ def post_value(row):
     if d.get('favorite_count') is not None:result['fav_count']=d['favorite_count']
     return result
 
+def load_source_credentials(cfg):
+    ref=cfg.get('credential_ref')
+    if ref:
+        directory = credential_directory(ref)
+        for key in SECRET_FIELDS:
+            path=directory/key
+            if path.exists():cfg[key]=path.read_text()
+        if cfg.get('api') == 'sankaku':
+            try:
+                session = (directory/'sankaku_session').read_text(encoding='utf-8')
+            except FileNotFoundError:
+                pass
+            else:
+                cfg['api_key'], cfg['cookie'] = session.split('\n', 1)
+
+
 class Relational:
     def raw_execute(self,sql,params=()):
         cur=self.raw.cursor();cur.execute(sql,params);return cur
 
     def source_config(self,source_id):
-        cur=self.raw_execute('SELECT * FROM sources WHERE id=%s',(source_id,));row=cur.fetchone()
-        if not row:raise ValueError('Site profile not found.')
-        d=dict(zip([x[0] for x in cur.description],row));cfg={k:v for k,v in d.items() if v is not None}
-        cfg.pop('deleted_at',None)
+        configs = self.source_configs([source_id])
+        if source_id not in configs:
+            raise ValueError('Site profile not found.')
+        return configs[source_id]
+
+    def source_configs(self,source_ids=None):
+        """Read a catalog in five queries, independent of the number of sites."""
+        if source_ids is not None and not source_ids:
+            return {}
+        where = '' if source_ids is None else ' WHERE id IN ('+','.join('%s' for _ in source_ids)+')'
+        cur = self.raw_execute('SELECT * FROM sources'+where, source_ids or ())
+        columns = [x[0] for x in cur.description]
+        configs = {}
+        for row in cur.fetchall():
+            d = dict(zip(columns,row))
+            cfg = {k:v for k,v in d.items() if v is not None}
+            cfg.pop('deleted_at',None)
+            cfg.update(mapping={},extra_params={},file_hosts=[])
+            try:
+                load_source_credentials(cfg)
+            except (OSError,ValueError):
+                for secret in SECRET_FIELDS:
+                    cfg.pop(secret,None)
+                cfg['credential_error'] = 'Saved credentials could not be read. Check the credential files for this site.'
+            configs[d['id']] = cfg
+        if not configs:
+            return configs
+        ids = list(configs)
+        suffix = ' WHERE source_id IN ('+','.join('%s' for _ in ids)+')'
         for table,key,value,name in [('source_field_mappings','field_name','field_path','mapping'),('source_options','option_name','option_value','extra_params')]:
-            cur=self.raw_execute(f'SELECT {key},{value}'+(',value_type' if table=='source_options' else '')+f' FROM {table} WHERE source_id=%s',(source_id,))
-            cfg[name]={}
-            for r in cur.fetchall():
-                v=r[1]
-                if table=='source_options':v={'int':int,'float':float,'bool':lambda x:x=='1','str':str,'null':lambda x:None}[r[2]](v)
-                cfg[name][r[0]]=v
-        cfg['file_hosts']=[r[0] for r in self.raw_execute('SELECT hostname FROM source_allowed_hosts WHERE source_id=%s',(source_id,)).fetchall()]
-        ref=d.get('credential_ref')
-        if ref:
-            directory = credential_directory(ref)
-            for key in SECRET_FIELDS:
-                path=directory/key
-                if path.exists():cfg[key]=path.read_text()
-            if cfg.get('api') == 'sankaku':
-                try:
-                    session = (directory/'sankaku_session').read_text(encoding='utf-8')
-                except FileNotFoundError:
-                    pass
-                else:
-                    cfg['api_key'], cfg['cookie'] = session.split('\n', 1)
-        cur=self.raw_execute('SELECT ok,message,UNIX_TIMESTAMP(checked_at),nsfw_available FROM source_checks WHERE source_id=%s',(source_id,));r=cur.fetchone()
-        if r:
-            cfg['last_test']=dict(ok=bool(r[0]),message=r[1],checked_at=float(r[2]))
-            if r[3] is not None:cfg['last_test']['nsfw_available']=bool(r[3])
-        return cfg
+            cur = self.raw_execute(f'SELECT source_id,{key},{value}'+(',value_type' if table=='source_options' else '')+f' FROM {table}'+suffix,ids)
+            for row in cur.fetchall():
+                value = row[2]
+                if table == 'source_options':
+                    value = {'int':int,'float':float,'bool':lambda x:x=='1','str':str,'null':lambda x:None}[row[3]](value)
+                configs[row[0]][name][row[1]] = value
+        for sid,hostname in self.raw_execute('SELECT source_id,hostname FROM source_allowed_hosts'+suffix,ids).fetchall():
+            configs[sid]['file_hosts'].append(hostname)
+        for sid,ok,message,checked,nsfw in self.raw_execute('SELECT source_id,ok,message,UNIX_TIMESTAMP(checked_at),nsfw_available FROM source_checks'+suffix,ids).fetchall():
+            test = dict(ok=bool(ok),message=message,checked_at=float(checked))
+            if nsfw is not None:
+                test['nsfw_available'] = bool(nsfw)
+            configs[sid]['last_test'] = test
+        return configs
 
     def save_source(self,source_id,cfg):
         fields=['name','url','api','enabled']+list(SOURCE_FIELDS)

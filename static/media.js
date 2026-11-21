@@ -19,38 +19,66 @@ function refreshPostCardStates(grid,posts,selected,downloadPath){
   }
 }
 
+// Wait outside the two network slots so one site's cooldown cannot stall others.
 const previewPending=[];
+const previewTasks=new Set();
 let previewActive=0;
 function enqueuePreviewFallback(img,recordId,failed){
-  previewPending.push({img,recordId,failed});
-  drainPreviewQueue();
+  const task={img,recordId,failed,attempts:0,deadline:Date.now()+120000,controller:null,timer:null};
+  previewTasks.add(task);previewPending.push(task);drainPreviewQueue();
+}
+function finishPreview(task,failed=false){
+  clearTimeout(task.timer);previewTasks.delete(task);
+  if(failed&&task.img.isConnected)task.failed();
+}
+function cancelDetachedPreviews(){
+  for(const task of previewTasks){
+    if(!task.img.isConnected){task.controller?.abort();finishPreview(task)}
+  }
 }
 function drainPreviewQueue(){
+  cancelDetachedPreviews();
   while(previewActive<2&&previewPending.length){
     const task=previewPending.shift();
-    if(!task.img.isConnected)continue;
+    if(!previewTasks.has(task))continue;
+    if(Date.now()>=task.deadline){finishPreview(task,true);continue}
     previewActive++;
     fetchQueuedPreview(task).finally(()=>{previewActive--;drainPreviewQueue()});
   }
 }
-async function fetchQueuedPreview({img,recordId,failed}){
-  try{
-    while(img.isConnected){
-      const controller=new AbortController();
-      const timeout=setTimeout(()=>controller.abort(),60000);
-      let response;
-      try{response=await fetch('/api/posts/'+recordId+'/preview',{signal:controller.signal})}
-      finally{clearTimeout(timeout)}
-      if(response.status===503&&response.headers.get('X-Preview-Busy')==='1'){
-        await new Promise(resolve=>setTimeout(resolve,1000));continue;
-      }
-      if(!response.ok)throw Error('Preview request failed');
-      const blob=await response.blob();
-      if(!img.isConnected)return;
-      const url=URL.createObjectURL(blob);
-      img.addEventListener('load',()=>URL.revokeObjectURL(url),{once:true});
-      img.addEventListener('error',()=>URL.revokeObjectURL(url),{once:true});
-      img.src=url;return;
-    }
-  }catch(error){if(img.isConnected)failed()}
+function previewRetryDelay(value,now=Date.now()){
+  if(value===null)return 1000;
+  const seconds=Number(value);
+  return Number.isFinite(seconds)?Math.max(1000,seconds*1000):Math.max(1000,(Date.parse(value)||now)-now);
 }
+async function fetchQueuedPreview(task){
+  const {img,recordId}=task;
+  const controller=task.controller=new AbortController();
+  const timeout=setTimeout(()=>controller.abort(),Math.min(45000,task.deadline-Date.now()));
+  try{
+    task.attempts++;
+    const response=await fetch('/api/posts/'+recordId+'/preview',{signal:controller.signal});
+    if(!img.isConnected){finishPreview(task);return}
+    if(response.status===503&&response.headers.get('X-Preview-Busy')==='1'){
+      const delay=previewRetryDelay(response.headers.get('Retry-After'));
+      // Release the response and slot before the cooldown, and stop after a bounded retry budget.
+      await response.body?.cancel();
+      if(task.attempts>=8||Date.now()+delay>=task.deadline){finishPreview(task,true);return}
+      task.timer=setTimeout(()=>{
+        if(!previewTasks.has(task))return;
+        previewPending.push(task);drainPreviewQueue();
+      },delay);
+      return;
+    }
+    if(!response.ok)throw Error('Preview request failed');
+    const blob=await response.blob();
+    if(!img.isConnected){finishPreview(task);return}
+    const url=URL.createObjectURL(blob);
+    img.addEventListener('load',()=>URL.revokeObjectURL(url),{once:true});
+    img.addEventListener('error',()=>URL.revokeObjectURL(url),{once:true});
+    img.src=url;finishPreview(task);
+  }catch(error){finishPreview(task,true)}
+  finally{clearTimeout(timeout);task.controller=null}
+}
+// Cancel stale network reads immediately when a new page replaces the cards.
+new MutationObserver(cancelDetachedPreviews).observe(document.getElementById('grid'),{childList:true,subtree:true});
