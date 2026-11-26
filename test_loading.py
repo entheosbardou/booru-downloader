@@ -178,6 +178,52 @@ class BrowseTests(unittest.TestCase):
         self.assertEqual([p['record_id'] for p in page['posts']],[1])
 
 
+class BrowseFilterTests(BrowseTests):
+    def setUp(self):
+        super().setUp()
+        self.db.executescript("""
+          CREATE TABLE post_tag_text(post_id PRIMARY KEY,tags);
+          CREATE TABLE tag_terms(id INTEGER PRIMARY KEY,signature,name);
+          CREATE TABLE tag_grams(gram,tag_id,PRIMARY KEY(gram,tag_id));
+          CREATE TABLE post_tags(post_id,tag_id,PRIMARY KEY(post_id,tag_id));
+          INSERT INTO post_tag_text VALUES(1,'blue_hair red_eyes'),(2,'blue_hair'),(3,'green_eyes'),(4,'blue_hair');
+          INSERT INTO tag_terms VALUES(1,'a','blue_hair'),(2,'b','red_eyes'),(3,'c','green_eyes');
+          INSERT INTO post_tags VALUES(1,1),(1,2),(2,1),(3,3),(4,1);
+        """)
+        for tid,name in ((1,'blue_hair'),(2,'red_eyes'),(3,'green_eyes')):
+            for i in range(len(name)-2):
+                self.db.execute('INSERT OR IGNORE INTO tag_grams VALUES(?,?)',(name[i:i+3],tid))
+        # Exercise both the direct small-scope route and the trigram route.
+        self.addCleanup(setattr,self.module.tag_index,'DIRECT_SCOPE_LIMIT',self.module.tag_index.DIRECT_SCOPE_LIMIT)
+
+    def each_route(self):
+        for limit in (10**9,-1):
+            self.module.tag_index.DIRECT_SCOPE_LIMIT=limit
+            yield limit
+
+    def test_filter_counts_and_pages_once_per_route(self):
+        for _ in self.each_route():
+            result=self.browse(filter='blue_hair')
+            self.assertEqual(result['total'],2)
+            self.assertEqual([p['record_id'] for p in result['posts']],[2,1])
+            second=self.browse(filter='blue_hair',per_page=1,page=2)
+            self.assertEqual([p['record_id'] for p in second['posts']],[1])
+            self.assertEqual(second['total_pages'],2)
+
+    def test_filter_clamps_page_past_the_end(self):
+        for _ in self.each_route():
+            result=self.browse(filter='blue_hair',per_page=1,page=9)
+            self.assertEqual(result['page'],2);self.assertEqual(result['total'],2)
+            self.assertEqual([p['record_id'] for p in result['posts']],[1])
+
+    def test_filter_without_matches_and_literal_phrase(self):
+        for _ in self.each_route():
+            empty=self.browse(filter='purple_hair')
+            self.assertEqual(empty['total'],0);self.assertEqual(empty['posts'],[])
+            self.assertEqual(self.browse(filter='blue_hair red_eyes')['total'],1)
+            self.assertEqual(self.browse(filter='red_eyes blue_hair')['total'],0)
+
+
 class PreviewTests(unittest.TestCase):
     def test_rejected_signed_preview_renews_once(self):
         module=route_module('media_api');app=Registrar();db=Mock()

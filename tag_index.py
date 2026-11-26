@@ -6,6 +6,11 @@ import time
 SETTING = 'saved_tag_index_v1'
 # Scopes at or below this many saved posts are filtered directly instead of through the trigram index.
 DIRECT_SCOPE_LIMIT = 50000
+# Bounds that keep every planning probe cheap regardless of library size.
+POSTING_LIMIT = 100000
+TERM_LIMIT = 5000
+GRAM_PROBE_LIMIT = 100001
+_GRAM_HITS = {}
 
 
 def status(db):
@@ -118,23 +123,64 @@ def filter_query(db, search_ids, text):
         sql = ('SELECT ro.* FROM result_order ro JOIN post_tag_text txt ON txt.post_id=ro.post_id '
                'WHERE ro.search_id IN ('+','.join('?' for _ in search_ids)+') AND instr(txt.tags,?)>0')
         return sql, [*search_ids,text]
+    term_ids = matching_term_ids(db, anchor)
+    slots = ','.join('?' for _ in search_ids)
+    if term_ids is None:
+        return legacy_query(db, search_ids, text, anchor)
+    if not term_ids:
+        return 'SELECT * FROM result_order WHERE 1=0', []
+    marks = ','.join('?' for _ in term_ids)
+    # Bounded probe: a rare tag is cheaper to drive from its postings, a common tag from the scope.
+    postings = db.execute('SELECT count(*) FROM (SELECT 1 FROM post_tags WHERE tag_id IN ('+marks+') LIMIT '+
+                          str(POSTING_LIMIT+1)+') AS bounded', term_ids).fetchone()[0]
+    if postings <= POSTING_LIMIT:
+        sql = ('SELECT ro.* FROM (SELECT DISTINCT post_id FROM post_tags WHERE tag_id IN ('+marks+')) AS candidates '
+               'JOIN result_order ro ON ro.post_id=candidates.post_id '
+               'JOIN post_tag_text txt ON txt.post_id=ro.post_id WHERE ro.search_id IN ('+slots+') AND instr(txt.tags,?)>0')
+        return sql, [*term_ids,*search_ids,text]
+    sql = ('SELECT ro.* FROM result_order ro JOIN post_tag_text txt ON txt.post_id=ro.post_id '
+           'WHERE ro.search_id IN ('+slots+') AND EXISTS (SELECT 1 FROM post_tags pt WHERE pt.post_id=ro.post_id '
+           'AND pt.tag_id IN ('+marks+')) AND instr(txt.tags,?)>0')
+    return sql, [*search_ids,*term_ids,text]
+
+
+def gram_hits(db, gram):
+    """Bounded, cached posting-list size used only to rank trigrams by rarity."""
+    hits = _GRAM_HITS.get(gram)
+    if hits is None:
+        hits = db.execute('SELECT count(*) FROM (SELECT 1 FROM tag_grams WHERE gram=? LIMIT '+str(GRAM_PROBE_LIMIT)+') AS bounded',
+                          (gram,)).fetchone()[0]
+        if len(_GRAM_HITS) > 20000:
+            _GRAM_HITS.clear()
+        _GRAM_HITS[gram] = hits
+    return hits
+
+
+def matching_term_ids(db, anchor):
+    """Ids of every tag term containing anchor, or None when there are too many to list."""
+    positions = [anchor[i:i+3] for i in range(len(anchor)-2)]
+    if len(positions) > 8:
+        positions = [positions[i*(len(positions)-1)//7] for i in range(8)]
+    ranked = sorted(set(positions), key=lambda gram: gram_hits(db, gram))[:3]
+    # Every trigram of the anchor must occur in a matching term. Probe the extra trigrams by primary key
+    # so only terms containing all of them reach the substring check.
+    joins = ''.join(' JOIN tag_grams g%d ON g%d.tag_id=g0.tag_id AND g%d.gram=?' % (i,i,i) for i in range(1,len(ranked)))
+    sql = ('SELECT g0.tag_id FROM tag_grams g0'+joins+' JOIN tag_terms t ON t.id=g0.tag_id '
+           'WHERE g0.gram=? AND instr(t.name,?)>0 LIMIT '+str(TERM_LIMIT+1))
+    ids = [row[0] for row in db.execute(sql, [*ranked[1:],ranked[0],anchor]).fetchall()]
+    return None if len(ids) > TERM_LIMIT else ids
+
+
+def legacy_query(db, search_ids, text, anchor):
+    """Original global route; only used when an anchor matches too many distinct tags to list."""
     pieces = sorted(grams(anchor))
-    params = []
-    if pieces:
-        rare = db.execute('SELECT gram,count(*) AS hits FROM tag_grams WHERE gram IN ('+
-                          ','.join('?' for _ in pieces)+') GROUP BY gram ORDER BY hits LIMIT 1',pieces).fetchone()
-        if not rare:
-            return 'SELECT * FROM result_order WHERE 1=0', []
-        terms = 'tag_grams g JOIN tag_terms t ON t.id=g.tag_id'
-        condition = 'g.gram=? AND instr(t.name,?)>0'
-        params = [rare[0],anchor]
-    else:
-        terms = 'tag_terms t'
-        condition = 'instr(t.name,?)>0'
-        params = [anchor]
-    sql = ('SELECT ro.* FROM (SELECT DISTINCT pt.post_id FROM '+terms+
-           ' JOIN post_tags pt ON pt.tag_id=t.id WHERE '+condition+') AS candidates '
+    rare = db.execute('SELECT gram,count(*) AS hits FROM tag_grams WHERE gram IN ('+
+                      ','.join('?' for _ in pieces)+') GROUP BY gram ORDER BY hits LIMIT 1',pieces).fetchone()
+    if not rare:
+        return 'SELECT * FROM result_order WHERE 1=0', []
+    sql = ('SELECT ro.* FROM (SELECT DISTINCT pt.post_id FROM tag_grams g JOIN tag_terms t ON t.id=g.tag_id'
+           ' JOIN post_tags pt ON pt.tag_id=t.id WHERE g.gram=? AND instr(t.name,?)>0) AS candidates '
            'JOIN result_order ro ON ro.post_id=candidates.post_id '
            'JOIN post_tag_text txt ON txt.post_id=ro.post_id WHERE ro.search_id IN ('+
            ','.join('?' for _ in search_ids)+') AND instr(txt.tags,?)>0')
-    return sql, [*params,*search_ids,text]
+    return sql, [rare[0],anchor,*search_ids,text]

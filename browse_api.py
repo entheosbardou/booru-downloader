@@ -74,26 +74,44 @@ def register_browse_routes(app, *, database, scoped_searches, get_source, positi
                 total=db.execute('SELECT count(*) FROM ('+filtered_sql+') AS filtered',filtered_params).fetchone()[0]
             elif term:
                 filtered_sql, filtered_params = tag_index.filter_query(db,ids,term)
-                total = db.execute('SELECT count(*) FROM ('+filtered_sql+') AS filtered',filtered_params).fetchone()[0]
-            elif not term:
-                total = db.execute('SELECT COALESCE(sum(total),0) FROM search_counts WHERE search_id IN ('+slots+')',ids).fetchone()[0]
-            total_pages = max(1, (total+per_page-1)//per_page)
-            page = min(page,total_pages)
-            page_limit = min(chunk_size,per_page-chunk_offset)
-            page_offset = (page-1)*per_page+chunk_offset
-            if not term:
-                page_sql,page_params = fast_page_query(ids,sort,page_limit,page_offset)
+                total = None
             else:
-                field = {'post_newest':'post_sort','post_oldest':'post_sort','added_newest':'added_key','added_oldest':'added_key','score':'score','resolution':'pixels'}[sort]
-                page_sql = f"SELECT post_id,search_id,added_key,{field} AS sort_value FROM ({filtered_sql}) AS filtered ORDER BY sort_value {direction},post_id {direction},added_key {direction} LIMIT ? OFFSET ?"
-                page_params = [*filtered_params,page_limit,page_offset]
-            rows = db.execute(f"""WITH page AS ({page_sql})
-              SELECT p.*,p.id AS record_id,page.search_id,
-              EXISTS(SELECT 1 FROM post_media saved_media JOIN media_files saved_link ON saved_link.media_id=saved_media.id JOIN file_locations saved_location ON saved_location.file_id=saved_link.file_id WHERE saved_media.post_id=p.id AND saved_location.status='present') AS downloaded,
-              EXISTS(SELECT 1 FROM jobs j WHERE j.kind='download' AND j.status IN ('queued','running') AND j.download_post_id=p.id) AS queued
-              FROM page JOIN post_records p ON p.id=page.post_id
-              ORDER BY page.sort_value {direction},page.post_id {direction},page.added_key {direction}""",
-              page_params).fetchall()
+                total = db.execute('SELECT COALESCE(sum(total),0) FROM search_counts WHERE search_id IN ('+slots+')',ids).fetchone()[0]
+            page_limit = min(chunk_size,per_page-chunk_offset)
+            field = {'post_newest':'post_sort','post_oldest':'post_sort','added_newest':'added_key','added_oldest':'added_key','score':'score','resolution':'pixels'}[sort]
+
+            def fetch_rows(page_number, with_total):
+                page_offset = (page_number-1)*per_page+chunk_offset
+                extra_select = ''
+                if not term:
+                    page_sql,page_params = fast_page_query(ids,sort,page_limit,page_offset)
+                else:
+                    # COUNT(*) OVER() returns the total from the same evaluation, so the filter runs once.
+                    counted = ',COUNT(*) OVER() AS total_rows' if with_total else ''
+                    extra_select = ',page.total_rows' if with_total else ''
+                    page_sql = f"SELECT post_id,search_id,added_key,{field} AS sort_value{counted} FROM ({filtered_sql}) AS filtered ORDER BY sort_value {direction},post_id {direction},added_key {direction} LIMIT ? OFFSET ?"
+                    page_params = [*filtered_params,page_limit,page_offset]
+                return db.execute(f"""WITH page AS ({page_sql})
+                  SELECT p.*,p.id AS record_id,page.search_id{extra_select},
+                  EXISTS(SELECT 1 FROM post_media saved_media JOIN media_files saved_link ON saved_link.media_id=saved_media.id JOIN file_locations saved_location ON saved_location.file_id=saved_link.file_id WHERE saved_media.post_id=p.id AND saved_location.status='present') AS downloaded,
+                  EXISTS(SELECT 1 FROM jobs j WHERE j.kind='download' AND j.status IN ('queued','running') AND j.download_post_id=p.id) AS queued
+                  FROM page JOIN post_records p ON p.id=page.post_id
+                  ORDER BY page.sort_value {direction},page.post_id {direction},page.added_key {direction}""",
+                  page_params).fetchall()
+
+            rows = None
+            if total is None:
+                rows = fetch_rows(page,True)
+                if rows:
+                    total = int(rows[0]['total_rows'])
+                else:
+                    # Requested page is past the end (or nothing matched); count once to clamp it.
+                    total = db.execute('SELECT count(*) FROM ('+filtered_sql+') AS filtered',filtered_params).fetchone()[0]
+            total_pages = max(1, (total+per_page-1)//per_page)
+            clamped = min(page,total_pages)
+            if rows is None or clamped != page:
+                page = clamped
+                rows = fetch_rows(page,False)
             result=[]
             clients={}
             for row in rows:
