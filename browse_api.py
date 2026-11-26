@@ -16,6 +16,12 @@ def fast_page_query(ids, sort, limit, offset):
     return sql,params+[limit,offset]
 
 
+# MySQL stops a filtered read on its own shortly before the browser gives up on it, so a request the
+# browser abandoned (new keystroke, page change, timeout) cannot keep running and starve other work.
+# The hint is a comment to servers that do not understand it.
+PAGE_LIMIT_MS = 25000
+COUNT_LIMIT_MS = 100000
+
 SORT_FIELDS = {'post_newest':'post_sort','post_oldest':'post_sort','added_newest':'added_key','added_oldest':'added_key','score':'score','resolution':'pixels'}
 
 STATUS_COLUMNS = """,
@@ -73,8 +79,9 @@ def fetch_page(db, *, ids, args, filtered_sql, filtered_params, limit, offset, w
         extra_select = ',page.total_rows' if with_total else ''
         page_sql = f"SELECT post_id,search_id,added_key,{field} AS sort_value{counted} FROM ({filtered_sql}) AS filtered ORDER BY sort_value {direction},post_id {direction},added_key {direction} LIMIT ? OFFSET ?"
         page_params = [*filtered_params,limit,offset]
+    limit_hint = f'/*+ MAX_EXECUTION_TIME({PAGE_LIMIT_MS}) */ ' if filtered_sql is not None else ''
     return db.execute(f"""WITH page AS ({page_sql})
-      SELECT p.*,p.id AS record_id,page.search_id{extra_select}{STATUS_COLUMNS if with_status else ''}
+      SELECT {limit_hint}p.*,p.id AS record_id,page.search_id{extra_select}{STATUS_COLUMNS if with_status else ''}
       FROM page JOIN post_records p ON p.id=page.post_id
       ORDER BY page.sort_value {direction},page.post_id {direction},page.added_key {direction}""",page_params).fetchall()
 
@@ -129,7 +136,7 @@ def register_browse_routes(app, *, database, scoped_searches, get_source, positi
                 total = db.execute('SELECT COALESCE(sum(total),0) FROM search_counts WHERE search_id IN ('+
                                    ','.join('?' for _ in ids)+')',ids).fetchone()[0]
             else:
-                total = db.execute('SELECT count(*) FROM ('+filtered_sql+') AS filtered',filtered_params).fetchone()[0]
+                total = db.execute('SELECT /*+ MAX_EXECUTION_TIME('+str(COUNT_LIMIT_MS)+') */ count(*) FROM ('+filtered_sql+') AS filtered',filtered_params).fetchone()[0]
         total = int(total)
         return jsonify(total=total,per_page=per_page,total_pages=max(1,(total+per_page-1)//per_page))
 

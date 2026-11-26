@@ -5,11 +5,10 @@ import time
 
 SETTING = 'saved_tag_index_v1'
 # Bounds that keep every planning probe cheap regardless of library size.
-POSTING_LIMIT = 100000      # largest tag posting list walked directly
+POSTING_CAP = 1000000       # most posting rows the planner will count when choosing a route
 TERM_LIMIT = 5000           # most distinct tags a filter word may expand to
 GRAM_PROBE_LIMIT = 100001   # cap when ranking trigrams by rarity
 MAX_ANCHORS = 3             # filter words used to narrow candidates
-SCOPE_PROBE_LIMIT = 200     # scopes this small are probed per post when the tag is very common
 # A single-word filter is answered from the tag index alone. Multi-word filters still verify the
 # literal phrase against the stored tag text, because word order and adjacency matter there.
 VERIFY_SINGLE_WORD = False
@@ -117,10 +116,10 @@ def scope_size(db, search_ids):
                       ','.join('?' for _ in search_ids)+')', search_ids).fetchone()[0]
 
 
-def posting_count(db, term_ids):
-    """Bounded size of the posts carrying any of these tags."""
+def posting_count(db, term_ids, cap):
+    """Posting rows carrying any of these tags, counted only up to cap + 1 so the probe stays cheap."""
     return db.execute('SELECT count(*) FROM (SELECT 1 FROM post_tags WHERE tag_id IN ('+
-                      ','.join('?' for _ in term_ids)+') LIMIT '+str(POSTING_LIMIT+1)+') AS bounded', term_ids).fetchone()[0]
+                      ','.join('?' for _ in term_ids)+') LIMIT '+str(int(cap)+1)+') AS bounded', term_ids).fetchone()[0]
 
 
 def filter_query(db, search_ids, text):
@@ -138,6 +137,8 @@ def filter_query(db, search_ids, text):
     words = sorted({t for t in tokens if len(t) >= 3}, key=lambda t: (-len(t), t))[:MAX_ANCHORS]
     if not words:
         return direct
+    scope = scope_size(db, search_ids) or POSTING_CAP   # unknown size: assume large rather than empty
+    cap = min(scope, POSTING_CAP)
     groups = []
     for word in words:
         ids = matching_term_ids(db, word)
@@ -145,7 +146,7 @@ def filter_query(db, search_ids, text):
             continue
         if not ids:              # no tag contains this word, so nothing can match
             return 'SELECT * FROM result_order WHERE 1=0', []
-        groups.append((posting_count(db, ids), ids))
+        groups.append((posting_count(db, ids, cap), ids))
     if not groups:
         return direct
     groups.sort(key=lambda group: group[0])
@@ -155,34 +156,29 @@ def filter_query(db, search_ids, text):
     text_args = [text] if verify else []
     rarest_count, rarest_ids = groups[0]
 
-    def exists(group_list):
+    def has_tag(group_list):
+        # A scalar subquery is evaluated once per candidate row through the (post_id, tag_id) primary key.
+        # Unlike EXISTS it cannot be flattened into a join that would drive from a huge tag posting list.
         sql, args = '', []
         for number, (_, ids) in enumerate(group_list):
-            sql += (' AND EXISTS (SELECT 1 FROM post_tags px%d WHERE px%d.post_id=ro.post_id AND px%d.tag_id IN (%s))'
+            sql += (' AND (SELECT count(*) FROM post_tags px%d WHERE px%d.post_id=ro.post_id AND px%d.tag_id IN (%s))>0'
                     % (number, number, number, ','.join('?' for _ in ids)))
             args += ids
         return sql, args
 
-    extra_sql, extra_args = exists(groups[1:])
-    if rarest_count <= POSTING_LIMIT:
-        # Posting lists are read in index order and a collection's result_order rows sit together, so this
-        # touches few pages even when nothing is cached.
+    if rarest_count <= cap:
+        # The rarest tag has no more posts than the collection has, so read its posting list (a covering
+        # index scan) and keep the posts that are in the collection.
+        extra_sql, extra_args = has_tag(groups[1:])
         sql = ('SELECT ro.* FROM (SELECT DISTINCT post_id FROM post_tags WHERE tag_id IN ('+
                ','.join('?' for _ in rarest_ids)+')) AS candidates '
                'JOIN result_order ro ON ro.post_id=candidates.post_id'+text_join+
                ' WHERE ro.search_id IN ('+slots+')'+extra_sql+text_test)
         return sql, [*rarest_ids, *search_ids, *extra_args, *text_args]
-    if scope_size(db, search_ids) <= SCOPE_PROBE_LIMIT:
-        # Very common tag but a tiny scope: a handful of lookups beats reading a long posting list.
-        extra_sql, extra_args = exists(groups)
-        sql = ('SELECT ro.* FROM result_order ro'+text_join+' WHERE ro.search_id IN ('+slots+')'+extra_sql+text_test)
-        return sql, [*search_ids, *extra_args, *text_args]
-    # Very common tag, large scope: stream the posting list rather than probing once per post in the scope.
-    # The comment is an optimizer hint on MySQL and is ignored elsewhere.
-    sql = ('SELECT /*+ JOIN_ORDER(pt, ro) */ DISTINCT ro.* FROM post_tags pt JOIN result_order ro ON ro.post_id=pt.post_id'+
-           text_join+' WHERE pt.tag_id IN ('+','.join('?' for _ in rarest_ids)+') AND ro.search_id IN ('+slots+')'+
-           extra_sql+text_test)
-    return sql, [*rarest_ids, *search_ids, *extra_args, *text_args]
+    # Every filter word is more common than the collection is large: check the collection's own posts.
+    extra_sql, extra_args = has_tag(groups)
+    sql = ('SELECT ro.* FROM result_order ro'+text_join+' WHERE ro.search_id IN ('+slots+')'+extra_sql+text_test)
+    return sql, [*search_ids, *extra_args, *text_args]
 
 
 def gram_hits(db, gram):

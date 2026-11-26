@@ -195,12 +195,40 @@ class BrowseFilterTests(BrowseTests):
                 self.db.execute('INSERT OR IGNORE INTO tag_grams VALUES(?,?)',(name[i:i+3],tid))
 
     def each_route(self):
-        """Run a check through every planner route: postings walk, per-post probes, streamed postings."""
+        """Run a check through both planner routes: walk the tag's posting list, or probe the collection."""
         ti=self.module.tag_index
-        routes=((10**9,10**9),(0,10),(0,10**6))   # (posting limit, scope size reported)
-        for limit,scope in routes:
-            with patch.object(ti,'POSTING_LIMIT',limit),patch.object(ti,'scope_size',return_value=scope):
-                yield limit,scope
+        for tag_posts,scope in ((1,100),(10**9,100)):
+            with patch.object(ti,'posting_count',return_value=tag_posts),patch.object(ti,'scope_size',return_value=scope):
+                yield tag_posts,scope
+
+    def planned_sql(self,tag_posts,scope,term='blue_hair'):
+        ti=self.module.tag_index
+        with patch.object(ti,'posting_count',return_value=tag_posts),patch.object(ti,'scope_size',return_value=scope):
+            return ti.filter_query(self.db,[1],term)[0]
+
+    def test_rare_tag_walks_postings_and_common_tag_probes_the_collection(self):
+        walk=self.planned_sql(50,2000);probe=self.planned_sql(5000000,2000)
+        self.assertIn('SELECT DISTINCT post_id FROM post_tags',walk)
+        self.assertNotIn('SELECT DISTINCT post_id FROM post_tags',probe)
+        self.assertIn('FROM post_tags px0 WHERE px0.post_id=ro.post_id',probe)
+
+    def test_route_never_reads_a_tag_list_longer_than_the_collection(self):
+        # A tag with more posts than the collection holds must be checked from the collection side.
+        self.assertIn('px0',self.planned_sql(2001,2000));self.assertNotIn('SELECT DISTINCT post_id',self.planned_sql(2001,2000))
+        self.assertIn('SELECT DISTINCT post_id',self.planned_sql(2000,2000))
+        for sql in (self.planned_sql(10**9,10**9),self.planned_sql(1,10)):
+            self.assertNotIn('JOIN_ORDER',sql)
+
+    def test_posting_probe_is_capped_by_collection_size(self):
+        ti=self.module.tag_index;caps=[]
+        def fake(db,ids,cap):
+            caps.append(cap);return 1
+        with patch.object(ti,'posting_count',side_effect=fake),patch.object(ti,'scope_size',return_value=1500):
+            ti.filter_query(self.db,[1],'blue_hair')
+        self.assertEqual(caps,[1500])
+        with patch.object(ti,'posting_count',side_effect=fake),patch.object(ti,'scope_size',return_value=10**9):
+            ti.filter_query(self.db,[1],'blue_hair')
+        self.assertEqual(caps[-1],ti.POSTING_CAP)
 
     def test_filter_counts_and_pages_once_per_route(self):
         for _ in self.each_route():
