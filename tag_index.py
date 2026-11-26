@@ -4,6 +4,8 @@ import re
 import time
 
 SETTING = 'saved_tag_index_v1'
+# Scopes at or below this many saved posts are filtered directly instead of through the trigram index.
+DIRECT_SCOPE_LIMIT = 50000
 
 
 def status(db):
@@ -106,7 +108,13 @@ def filter_query(db, search_ids, text):
     """Narrow via indexed tag trigrams, then preserve the original literal substring semantics."""
     text = text.casefold()
     anchor = max(re.findall(r'\S+',text),key=len)
-    if len(anchor) < 3:
+    # The trigram route first collects every post in the whole database that has a matching tag,
+    # then intersects with the selected scope. That cost does not depend on scope size, so a
+    # collection of a few dozen posts can still time out. When the scope is small, checking its
+    # own rows directly is far cheaper and gives identical results.
+    scope = db.execute('SELECT COALESCE(sum(total),0) FROM search_counts WHERE search_id IN ('+
+                       ','.join('?' for _ in search_ids)+')',search_ids).fetchone()[0]
+    if len(anchor) < 3 or scope <= DIRECT_SCOPE_LIMIT:
         sql = ('SELECT ro.* FROM result_order ro JOIN post_tag_text txt ON txt.post_id=ro.post_id '
                'WHERE ro.search_id IN ('+','.join('?' for _ in search_ids)+') AND instr(txt.tags,?)>0')
         return sql, [*search_ids,text]
