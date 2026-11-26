@@ -45,21 +45,55 @@ async function testRequestBodyTimeout(){
  rt.run(source('api.js'));const result=rt.run("api('/library',undefined,{timeout:50})");
  const check=assert.rejects(result,/timed out/);await flush();await rt.tick(50);await check;
 }
-async function testStalePageCancellation(){
- const nodes=new Map();const node=id=>{if(!nodes.has(id))nodes.set(id,{value:'',textContent:'',classList:{toggle(){}}});return nodes.get(id)};
- const pending=[];
+function browseRuntime(handlers){
+ const nodes=new Map();const node=id=>{if(!nodes.has(id))nodes.set(id,{value:'',textContent:'',disabled:false,max:0,classList:{toggle(){},remove(){}}});return nodes.get(id)};
  const rt=runtime({$:node,active:7,postsRequest:0,perPage:48,resultSort:'post_newest',page:1,selected:new Set(),
   state:{settings:{}},current:[],renderKey:'',activeSearch:()=>({count:2}),activePath:id=>'/searches/'+id,
-  hasSearch:()=>true,setBusyControls(){},renderPosts(){},
-  api:(url,body,options)=>new Promise(resolve=>pending.push({resolve,signal:options.signal}))});
- rt.run(source('browse.js'));
+  hasSearch:()=>true,setBusyControls(){},renderPosts(){},toast(){},api:handlers});
+ rt.run(source('browse.js'));rt.nodes=nodes;return rt;
+}
+async function testStalePageCancellation(){
+ const pending=[];
+ const rt=browseRuntime((url,body,options)=>{
+  if(url.includes('/posts/count'))return Promise.resolve({total:1,total_pages:1,per_page:48});
+  if(url.includes('/posts/status'))return Promise.resolve({posts:[]});
+  return new Promise(resolve=>pending.push({resolve,signal:options.signal}))});
  const first=rt.run('loadPosts()');rt.context.active=8;const second=rt.run('loadPosts()');
  assert.equal(pending[0].signal.aborted,true);
- const page=id=>({page:1,total_pages:1,total:1,posts:[{record_id:id}],more_on_page:false});
+ const page=id=>({page:1,posts:[{record_id:id}],more_on_page:false,has_next:false});
  pending[1].resolve(page(8));await second;pending[0].resolve(page(7));await first;
  assert.equal(rt.context.current[0].record_id,8,'late results cannot overwrite the chosen search');
 }
+async function testSectionsLoadIndependently(){
+ const calls=[];
+ // The total never answers, yet the grid still renders and the load completes.
+ let rt=browseRuntime((url,body,options)=>{calls.push(url);
+  if(url.includes('/posts/count'))return new Promise(()=>{});
+  if(url.includes('/posts/status'))return Promise.resolve({posts:[]});
+  return Promise.resolve({page:1,posts:[{record_id:5}],more_on_page:false,has_next:true})});
+ await rt.run('loadPosts()');
+ assert.equal(rt.context.current[0].record_id,5,'results must not wait for the total');
+ assert.ok(calls.some(u=>u.includes('/posts/page'))&&calls.some(u=>u.includes('/posts/count')),'page and total use separate requests');
+ assert.equal(rt.nodes.get('browse-total').textContent,'Counting matching results…');
+ assert.equal(rt.nodes.get('next').disabled,false,'next is allowed from the page response alone');
+ // A failed total is reported in its own place and leaves the grid usable.
+ rt=browseRuntime(url=>{
+  if(url.includes('/posts/count'))return Promise.reject(Error('slow'));
+  if(url.includes('/posts/status'))return Promise.resolve({posts:[]});
+  return Promise.resolve({page:1,posts:[{record_id:6}],more_on_page:false,has_next:false})});
+ await rt.run('loadPosts()');await flush();
+ assert.equal(rt.context.current[0].record_id,6);
+ assert.match(rt.nodes.get('browse-total').textContent,/Total unavailable/);
+ // A failing status request must not break or block the grid either.
+ rt=browseRuntime(url=>{
+  if(url.includes('/posts/count'))return Promise.resolve({total:1,total_pages:1,per_page:48});
+  if(url.includes('/posts/status'))return Promise.reject(Error('status down'));
+  return Promise.resolve({page:1,posts:[{record_id:7,status_pending:true}],more_on_page:false,has_next:false})});
+ await rt.run('loadPosts()');await flush();
+ assert.equal(rt.context.current[0].record_id,7);
+ assert.match(rt.nodes.get('browse-total').textContent,/1 matching results/);
+}
 (async()=>{
- await testCooldown();await testDetachedImage();await testRequestBodyTimeout();await testStalePageCancellation();
- console.log('PASS: preview cooldown isolation, detached cancellation, body timeout, and stale page cancellation');
+ await testCooldown();await testDetachedImage();await testRequestBodyTimeout();await testStalePageCancellation();await testSectionsLoadIndependently();
+ console.log('PASS: preview cooldown isolation, detached cancellation, body timeout, stale page cancellation, and independent page/total/status loading');
 })().catch(error=>{console.error(error);process.exitCode=1});

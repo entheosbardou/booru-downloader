@@ -193,13 +193,14 @@ class BrowseFilterTests(BrowseTests):
         for tid,name in ((1,'blue_hair'),(2,'red_eyes'),(3,'green_eyes')):
             for i in range(len(name)-2):
                 self.db.execute('INSERT OR IGNORE INTO tag_grams VALUES(?,?)',(name[i:i+3],tid))
-        # Exercise both the direct small-scope route and the trigram route.
-        self.addCleanup(setattr,self.module.tag_index,'DIRECT_SCOPE_LIMIT',self.module.tag_index.DIRECT_SCOPE_LIMIT)
 
     def each_route(self):
-        for limit in (10**9,-1):
-            self.module.tag_index.DIRECT_SCOPE_LIMIT=limit
-            yield limit
+        """Run a check through every planner route: postings walk, per-post probes, streamed postings."""
+        ti=self.module.tag_index
+        routes=((10**9,10**9),(0,10),(0,10**6))   # (posting limit, scope size reported)
+        for limit,scope in routes:
+            with patch.object(ti,'POSTING_LIMIT',limit),patch.object(ti,'scope_size',return_value=scope):
+                yield limit,scope
 
     def test_filter_counts_and_pages_once_per_route(self):
         for _ in self.each_route():
@@ -222,6 +223,41 @@ class BrowseFilterTests(BrowseTests):
             self.assertEqual(empty['total'],0);self.assertEqual(empty['posts'],[])
             self.assertEqual(self.browse(filter='blue_hair red_eyes')['total'],1)
             self.assertEqual(self.browse(filter='red_eyes blue_hair')['total'],0)
+
+
+    def endpoint(self,suffix,**args):
+        self.module.request.args=args
+        return self.app.routes['GET','/api/collections/<int:gid>/posts'+suffix](gid=1)
+
+    def test_page_endpoint_has_no_total_and_defers_status(self):
+        result=self.endpoint('/page',sort='post_newest')
+        self.assertNotIn('total',result);self.assertNotIn('tag_index',result)
+        self.assertEqual([p['record_id'] for p in result['posts']],[3,2,1])
+        self.assertTrue(all(p['status_pending'] and not p['downloaded'] and not p['queued'] for p in result['posts']))
+
+    def test_page_endpoint_reports_next_without_counting(self):
+        first=self.endpoint('/page',per_page=2);second=self.endpoint('/page',per_page=2,page=2)
+        self.assertTrue(first['has_next']);self.assertFalse(second['has_next'])
+        self.assertEqual([p['record_id'] for p in first['posts']+second['posts']],[3,2,1])
+        past=self.endpoint('/page',per_page=2,page=9)
+        self.assertEqual(past['posts'],[]);self.assertFalse(past['has_next'])
+
+    def test_page_endpoint_chunks_stream_the_same_page(self):
+        first=self.endpoint('/page',per_page=3,chunk_size=2);second=self.endpoint('/page',per_page=3,chunk_size=2,chunk_offset=2)
+        self.assertTrue(first['more_on_page']);self.assertFalse(second['more_on_page'])
+        self.assertEqual([p['record_id'] for p in first['posts']+second['posts']],[3,2,1])
+
+    def test_count_endpoint_is_separate_and_filter_aware(self):
+        self.assertEqual(self.endpoint('/count',per_page=2),dict(total=3,per_page=2,total_pages=2))
+        for _ in self.each_route():
+            self.assertEqual(self.endpoint('/count',filter='blue_hair')['total'],2)
+            self.assertEqual(self.endpoint('/count',filter='purple_hair')['total'],0)
+
+    def test_filtered_page_matches_through_every_route(self):
+        for _ in self.each_route():
+            result=self.endpoint('/page',filter='blue_hair')
+            self.assertEqual([p['record_id'] for p in result['posts']],[2,1])
+            self.assertEqual(self.endpoint('/page',filter='blue_hair red_eyes')['posts'][0]['record_id'],1)
 
 
 class PreviewTests(unittest.TestCase):

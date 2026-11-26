@@ -8,13 +8,13 @@ function refreshPostCardStates(grid,posts,selected,downloadPath){
   for(const p of posts){
     const card=cards.get(p.record_id);if(!card)continue;
     const check=card.querySelector('input');
-    check.disabled=p.queued||p.downloaded;if(check.disabled)selected.delete(p.record_id);check.checked=!check.disabled&&selected.has(p.record_id);
+    check.disabled=p.queued||p.downloaded||p.status_pending;if(check.disabled)selected.delete(p.record_id);check.checked=!check.disabled&&selected.has(p.record_id);
     const saved=card.querySelector('.badge.done');
     if(p.downloaded&&!saved){const badge=document.createElement('span');badge.className='badge done';badge.textContent='Saved';card.querySelector('.card-top').append(badge)}
     if(!p.downloaded&&saved)saved.remove();
     const button=card.querySelector('.entry-download');
     button.textContent=p.queued?'Queued':p.downloaded?'Open saved file':'Download';
-    button.disabled=p.queued||(!p.downloaded&&!downloadPath);
+    button.disabled=p.queued||p.status_pending||(!p.downloaded&&!downloadPath);
     button.onclick=()=>p.downloaded?window.open(`/api/posts/${p.record_id}/file`,'_blank','noopener'):queueDownloads([p.record_id]);
   }
 }

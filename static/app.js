@@ -146,7 +146,7 @@ $('resume').onclick=()=>action(()=>api(`${activePath()}/resume`,{batches:Number(
 $('refresh').onclick=()=>action(()=>api(`${activePath()}/resume`,{batches:Number($('batches').value),restart:true}),r=>`${r.queued} sites refreshing from newest. Existing results retained.`);
 $('download-selected').onclick=()=>queueDownloads([...selected]);
 $('download-all').onclick=()=>queueDownloads();
-$('select-page').onclick=()=>{for(const p of current)if(!p.queued&&!p.downloaded)selected.add(p.record_id);renderPosts();setBusyControls()};
+$('select-page').onclick=()=>{for(const p of current)if(!p.queued&&!p.downloaded&&!p.status_pending)selected.add(p.record_id);renderPosts();setBusyControls()};
 function retryMessage(r){return `${r.retried} task(s) queued to resume.`+(r.skipped.length?` ${r.skipped.length} unchanged: ${r.skipped[0].reason}`:'')}
 async function skipPost(recordId){if(!window.confirm('Skip this post and delete any downloaded files? Files shared with other posts will be kept.'))return;const result=await action(()=>api(`/posts/${recordId}/skip`,{}),r=>`Skipped post; removed from ${r.removed_results.toLocaleString()} saved result(s), cleared ${r.cleared_downloads.toLocaleString()} download(s)${r.stopping_downloads?`, requested stop for ${r.stopping_downloads} active download(s)`:''}. Deleted ${r.deleted_files.toLocaleString()} file(s).${r.shared_files?` Kept ${r.shared_files.toLocaleString()} shared file(s).`:''}`);if(result){selected.delete(recordId);await refreshFailures(true)}}
 $('retry-failed').onclick=async()=>{$('retry-failed').disabled=true;await action(()=>api('/jobs/retry-failed',{}),retryMessage);await refreshFailures(true)};

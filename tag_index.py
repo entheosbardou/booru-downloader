@@ -4,12 +4,15 @@ import re
 import time
 
 SETTING = 'saved_tag_index_v1'
-# Scopes at or below this many saved posts are filtered directly instead of through the trigram index.
-DIRECT_SCOPE_LIMIT = 50000
 # Bounds that keep every planning probe cheap regardless of library size.
-POSTING_LIMIT = 100000
-TERM_LIMIT = 5000
-GRAM_PROBE_LIMIT = 100001
+POSTING_LIMIT = 100000      # largest tag posting list walked directly
+TERM_LIMIT = 5000           # most distinct tags a filter word may expand to
+GRAM_PROBE_LIMIT = 100001   # cap when ranking trigrams by rarity
+MAX_ANCHORS = 3             # filter words used to narrow candidates
+SCOPE_PROBE_LIMIT = 200     # scopes this small are probed per post when the tag is very common
+# A single-word filter is answered from the tag index alone. Multi-word filters still verify the
+# literal phrase against the stored tag text, because word order and adjacency matter there.
+VERIFY_SINGLE_WORD = False
 _GRAM_HITS = {}
 
 
@@ -109,39 +112,77 @@ def run(database, logger):
             time.sleep(10)
 
 
+def scope_size(db, search_ids):
+    return db.execute('SELECT COALESCE(sum(total),0) FROM search_counts WHERE search_id IN ('+
+                      ','.join('?' for _ in search_ids)+')', search_ids).fetchone()[0]
+
+
+def posting_count(db, term_ids):
+    """Bounded size of the posts carrying any of these tags."""
+    return db.execute('SELECT count(*) FROM (SELECT 1 FROM post_tags WHERE tag_id IN ('+
+                      ','.join('?' for _ in term_ids)+') LIMIT '+str(POSTING_LIMIT+1)+') AS bounded', term_ids).fetchone()[0]
+
+
 def filter_query(db, search_ids, text):
-    """Narrow via indexed tag trigrams, then preserve the original literal substring semantics."""
+    """Rows of result_order matching the filter, planned so no step scales with the whole library.
+
+    Resolve each filter word to the tag ids containing it, then walk whichever is smaller: the tag's
+    posting list (sequential, covering index) or the selected collection. Matching is a literal
+    substring of the saved tag text, as before.
+    """
     text = text.casefold()
-    anchor = max(re.findall(r'\S+',text),key=len)
-    # The trigram route first collects every post in the whole database that has a matching tag,
-    # then intersects with the selected scope. That cost does not depend on scope size, so a
-    # collection of a few dozen posts can still time out. When the scope is small, checking its
-    # own rows directly is far cheaper and gives identical results.
-    scope = db.execute('SELECT COALESCE(sum(total),0) FROM search_counts WHERE search_id IN ('+
-                       ','.join('?' for _ in search_ids)+')',search_ids).fetchone()[0]
-    if len(anchor) < 3 or scope <= DIRECT_SCOPE_LIMIT:
-        sql = ('SELECT ro.* FROM result_order ro JOIN post_tag_text txt ON txt.post_id=ro.post_id '
-               'WHERE ro.search_id IN ('+','.join('?' for _ in search_ids)+') AND instr(txt.tags,?)>0')
-        return sql, [*search_ids,text]
-    term_ids = matching_term_ids(db, anchor)
+    tokens = re.findall(r'\S+', text)
     slots = ','.join('?' for _ in search_ids)
-    if term_ids is None:
-        return legacy_query(db, search_ids, text, anchor)
-    if not term_ids:
-        return 'SELECT * FROM result_order WHERE 1=0', []
-    marks = ','.join('?' for _ in term_ids)
-    # Bounded probe: a rare tag is cheaper to drive from its postings, a common tag from the scope.
-    postings = db.execute('SELECT count(*) FROM (SELECT 1 FROM post_tags WHERE tag_id IN ('+marks+') LIMIT '+
-                          str(POSTING_LIMIT+1)+') AS bounded', term_ids).fetchone()[0]
-    if postings <= POSTING_LIMIT:
-        sql = ('SELECT ro.* FROM (SELECT DISTINCT post_id FROM post_tags WHERE tag_id IN ('+marks+')) AS candidates '
-               'JOIN result_order ro ON ro.post_id=candidates.post_id '
-               'JOIN post_tag_text txt ON txt.post_id=ro.post_id WHERE ro.search_id IN ('+slots+') AND instr(txt.tags,?)>0')
-        return sql, [*term_ids,*search_ids,text]
-    sql = ('SELECT ro.* FROM result_order ro JOIN post_tag_text txt ON txt.post_id=ro.post_id '
-           'WHERE ro.search_id IN ('+slots+') AND EXISTS (SELECT 1 FROM post_tags pt WHERE pt.post_id=ro.post_id '
-           'AND pt.tag_id IN ('+marks+')) AND instr(txt.tags,?)>0')
-    return sql, [*search_ids,*term_ids,text]
+    direct = ('SELECT ro.* FROM result_order ro JOIN post_tag_text txt ON txt.post_id=ro.post_id '
+              'WHERE ro.search_id IN ('+slots+') AND instr(txt.tags,?)>0', [*search_ids, text])
+    words = sorted({t for t in tokens if len(t) >= 3}, key=lambda t: (-len(t), t))[:MAX_ANCHORS]
+    if not words:
+        return direct
+    groups = []
+    for word in words:
+        ids = matching_term_ids(db, word)
+        if ids is None:          # too common to narrow with; the text check still applies
+            continue
+        if not ids:              # no tag contains this word, so nothing can match
+            return 'SELECT * FROM result_order WHERE 1=0', []
+        groups.append((posting_count(db, ids), ids))
+    if not groups:
+        return direct
+    groups.sort(key=lambda group: group[0])
+    verify = len(tokens) > 1 or VERIFY_SINGLE_WORD
+    text_join = ' JOIN post_tag_text txt ON txt.post_id=ro.post_id' if verify else ''
+    text_test = ' AND instr(txt.tags,?)>0' if verify else ''
+    text_args = [text] if verify else []
+    rarest_count, rarest_ids = groups[0]
+
+    def exists(group_list):
+        sql, args = '', []
+        for number, (_, ids) in enumerate(group_list):
+            sql += (' AND EXISTS (SELECT 1 FROM post_tags px%d WHERE px%d.post_id=ro.post_id AND px%d.tag_id IN (%s))'
+                    % (number, number, number, ','.join('?' for _ in ids)))
+            args += ids
+        return sql, args
+
+    extra_sql, extra_args = exists(groups[1:])
+    if rarest_count <= POSTING_LIMIT:
+        # Posting lists are read in index order and a collection's result_order rows sit together, so this
+        # touches few pages even when nothing is cached.
+        sql = ('SELECT ro.* FROM (SELECT DISTINCT post_id FROM post_tags WHERE tag_id IN ('+
+               ','.join('?' for _ in rarest_ids)+')) AS candidates '
+               'JOIN result_order ro ON ro.post_id=candidates.post_id'+text_join+
+               ' WHERE ro.search_id IN ('+slots+')'+extra_sql+text_test)
+        return sql, [*rarest_ids, *search_ids, *extra_args, *text_args]
+    if scope_size(db, search_ids) <= SCOPE_PROBE_LIMIT:
+        # Very common tag but a tiny scope: a handful of lookups beats reading a long posting list.
+        extra_sql, extra_args = exists(groups)
+        sql = ('SELECT ro.* FROM result_order ro'+text_join+' WHERE ro.search_id IN ('+slots+')'+extra_sql+text_test)
+        return sql, [*search_ids, *extra_args, *text_args]
+    # Very common tag, large scope: stream the posting list rather than probing once per post in the scope.
+    # The comment is an optimizer hint on MySQL and is ignored elsewhere.
+    sql = ('SELECT /*+ JOIN_ORDER(pt, ro) */ DISTINCT ro.* FROM post_tags pt JOIN result_order ro ON ro.post_id=pt.post_id'+
+           text_join+' WHERE pt.tag_id IN ('+','.join('?' for _ in rarest_ids)+') AND ro.search_id IN ('+slots+')'+
+           extra_sql+text_test)
+    return sql, [*rarest_ids, *search_ids, *extra_args, *text_args]
 
 
 def gram_hits(db, gram):
@@ -169,18 +210,3 @@ def matching_term_ids(db, anchor):
            'WHERE g0.gram=? AND instr(t.name,?)>0 LIMIT '+str(TERM_LIMIT+1))
     ids = [row[0] for row in db.execute(sql, [*ranked[1:],ranked[0],anchor]).fetchall()]
     return None if len(ids) > TERM_LIMIT else ids
-
-
-def legacy_query(db, search_ids, text, anchor):
-    """Original global route; only used when an anchor matches too many distinct tags to list."""
-    pieces = sorted(grams(anchor))
-    rare = db.execute('SELECT gram,count(*) AS hits FROM tag_grams WHERE gram IN ('+
-                      ','.join('?' for _ in pieces)+') GROUP BY gram ORDER BY hits LIMIT 1',pieces).fetchone()
-    if not rare:
-        return 'SELECT * FROM result_order WHERE 1=0', []
-    sql = ('SELECT ro.* FROM (SELECT DISTINCT pt.post_id FROM tag_grams g JOIN tag_terms t ON t.id=g.tag_id'
-           ' JOIN post_tags pt ON pt.tag_id=t.id WHERE g.gram=? AND instr(t.name,?)>0) AS candidates '
-           'JOIN result_order ro ON ro.post_id=candidates.post_id '
-           'JOIN post_tag_text txt ON txt.post_id=ro.post_id WHERE ro.search_id IN ('+
-           ','.join('?' for _ in search_ids)+') AND instr(txt.tags,?)>0')
-    return sql, [rare[0],anchor,*search_ids,text]
