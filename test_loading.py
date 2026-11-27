@@ -287,6 +287,32 @@ class BrowseFilterTests(BrowseTests):
             self.assertEqual([p['record_id'] for p in result['posts']],[2,1])
             self.assertEqual(self.endpoint('/page',filter='blue_hair red_eyes')['posts'][0]['record_id'],1)
 
+    def test_site_windows_match_the_full_filter_for_every_sort_and_page(self):
+        for _ in self.each_route():
+            for term in ('hair', 'eyes', 'blue_hair red_eyes', 'ey'):
+                for sort in self.module.SORT_FIELDS:
+                    for page in (1, 2):
+                        args=dict(filter=term,sort=sort,per_page=1,page=page)
+                        fast=self.endpoint('/page',**args)
+                        with patch.object(self.module,'MAX_SCOPED_WINDOW',0):
+                            baseline=self.endpoint('/page',**args)
+                        self.assertEqual(fast,baseline)
+
+    def test_timed_out_posting_estimate_keeps_index_matches(self):
+        ti=self.module.tag_index
+        with patch.object(ti,'posting_count',side_effect=ti.PlanningTimeout):
+            result=self.endpoint('/page',filter='blue_hair')
+        self.assertEqual([p['record_id'] for p in result['posts']],[2,1])
+
+    def test_tag_expansion_cache_respects_index_revision(self):
+        ti=self.module.tag_index
+        with patch.object(ti,'_TERM_CACHE',ti.OrderedDict()), \
+             patch.object(ti,'matching_term_ids',side_effect=[[1],[1,2]]) as lookup:
+            self.assertEqual(ti.cached_term_ids(self.db,'hair',1),[1])
+            self.assertEqual(ti.cached_term_ids(self.db,'hair',1),[1])
+            self.assertEqual(ti.cached_term_ids(self.db,'hair',2),[1,2])
+        self.assertEqual(lookup.call_count,2)
+
 
 class PreviewTests(unittest.TestCase):
     def test_rejected_signed_preview_renews_once(self):

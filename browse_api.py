@@ -5,24 +5,44 @@ from relational import post_value
 import tag_index
 
 
-def fast_page_query(ids, sort, limit, offset):
-    field = {'post_newest':'post_sort','post_oldest':'post_sort','added_newest':'added_key','added_oldest':'added_key','score':'score','resolution':'pixels'}[sort]
+SORT_FIELDS = {'post_newest':'post_sort','post_oldest':'post_sort','added_newest':'added_key','added_oldest':'added_key','score':'score','resolution':'pixels'}
+MAX_SCOPED_WINDOW = 500
+MAX_WINDOW_PARAMS = 10000
+
+
+def site_windows(ids, sort, size, join='', predicate='', args=(), *, mysql=False):
+    field = SORT_FIELDS[sort]
     direction = 'ASC' if sort in ('post_oldest','added_oldest') else 'DESC'
-    order = field+' '+direction+('' if field=='added_key' else ',post_id '+direction+',added_key '+direction)
-    # Each site contributes at most the requested window, then merge tiny lists.
-    pieces = [f'SELECT * FROM (SELECT post_id,search_id,added_key,{field} AS sort_value FROM result_order INDEXED BY result_order_{field} WHERE search_id=? ORDER BY {order} LIMIT ?) AS site_{i}' for i,_ in enumerate(ids)]
-    sql = 'SELECT * FROM ('+' UNION ALL '.join(pieces)+') AS site_windows ORDER BY sort_value '+direction+',post_id '+direction+',added_key '+direction+' LIMIT ? OFFSET ?'
-    params = [value for sid in ids for value in (sid,limit+offset)]
-    return sql,params+[limit,offset]
+    order = f'ro.{field} {direction},ro.post_id {direction}'
+    if field != 'added_key':
+        order += f',ro.added_key {direction}'
+    columns = 'ro.post_id,ro.search_id,ro.added_key'
+    if field != 'added_key':
+        columns += f',ro.{field}'
+    index = f'FORCE INDEX (result_order_{field})' if mysql else f'INDEXED BY result_order_{field}'
+    pieces = [
+        f'SELECT * FROM (SELECT {columns} FROM result_order ro {index}{join}'
+        f' WHERE ro.search_id=?{predicate} ORDER BY {order} LIMIT ?) AS site_{i}'
+        for i, _ in enumerate(ids)
+    ]
+    params = [value for sid in ids for value in (sid,*args,size)]
+    return ' UNION ALL '.join(pieces), params
+
+
+def fast_page_query(ids, sort, limit, offset):
+    field = SORT_FIELDS[sort]
+    direction = 'ASC' if sort in ('post_oldest','added_oldest') else 'DESC'
+    windows, params = site_windows(ids, sort, limit+offset)
+    sql = (f'SELECT post_id,search_id,added_key,{field} AS sort_value FROM ({windows}) AS site_windows'
+           f' ORDER BY sort_value {direction},post_id {direction},added_key {direction} LIMIT ? OFFSET ?')
+    return sql, [*params,limit,offset]
 
 
 # MySQL stops a filtered read on its own shortly before the browser gives up on it, so a request the
 # browser abandoned (new keystroke, page change, timeout) cannot keep running and starve other work.
 # The hint is a comment to servers that do not understand it.
-PAGE_LIMIT_MS = 25000
+PAGE_LIMIT_MS = 20000
 COUNT_LIMIT_MS = 100000
-
-SORT_FIELDS = {'post_newest':'post_sort','post_oldest':'post_sort','added_newest':'added_key','added_oldest':'added_key','score':'score','resolution':'pixels'}
 
 STATUS_COLUMNS = """,
               EXISTS(SELECT 1 FROM post_media saved_media JOIN media_files saved_link ON saved_link.media_id=saved_media.id JOIN file_locations saved_location ON saved_location.file_id=saved_link.file_id WHERE saved_media.post_id=p.id AND saved_location.status='present') AS downloaded,
@@ -44,7 +64,7 @@ def browse_args(positive):
                 direction='ASC' if sort in ('post_oldest','added_oldest') else 'DESC')
 
 
-def build_filter(db, ids, term):
+def build_filter(db, ids, term, *, page_sort=None, page_window=0):
     """SQL for the result_order rows a saved-result filter keeps; (None, None, None) when unfiltered."""
     if not term:
         return None, None, None
@@ -64,7 +84,14 @@ def build_filter(db, ids, term):
         if job and job['download_post_id']:
             return 'SELECT * FROM result_order WHERE search_id=? AND post_id=?', [job['search_id'],job['download_post_id']], job
         return 'SELECT * FROM result_order WHERE 1=0', [], job
-    sql, params = tag_index.filter_query(db,ids,term)
+    def scoped_page(join, predicate, args):
+        if len(ids)*(len(args)+2) > MAX_WINDOW_PARAMS:
+            return None
+        return site_windows(ids, page_sort, page_window, join, predicate, args,
+                            mysql=getattr(db, 'is_mysql', False))
+
+    use_windows = page_sort is not None and 0 < page_window <= MAX_SCOPED_WINDOW
+    sql, params = tag_index.filter_query(db,ids,term,scoped_page=scoped_page if use_windows else None)
     return sql, params, None
 
 
@@ -113,7 +140,8 @@ def register_browse_routes(app, *, database, scoped_searches, get_source, positi
         offset = (args['page']-1)*args['per_page']+args['chunk_offset']
         with database() as db:
             ids = [row['id'] for row in scoped_searches(db,sid,gid)]
-            filtered_sql, filtered_params, lookup_job = build_filter(db,ids,args['term'])
+            filtered_sql, filtered_params, lookup_job = build_filter(
+                db,ids,args['term'],page_sort=args['sort'],page_window=limit+offset+1)
             # One extra row says whether anything follows without counting the whole result set.
             rows = fetch_page(db,ids=ids,args=args,filtered_sql=filtered_sql,filtered_params=filtered_params,
                               limit=limit+1,offset=offset,with_status=False)

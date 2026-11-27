@@ -243,6 +243,11 @@ def bad_input(exc):
     return jsonify(error=str(exc)), 400
 
 
+@app.errorhandler(tag_index.PlanningTimeout)
+def saved_tag_lookup_timeout(exc):
+    return jsonify(error='The saved-tag lookup timed out. Please retry.'), 503
+
+
 @app.errorhandler(OSError)
 def io_error(exc):
     return jsonify(error=str(exc)), 400

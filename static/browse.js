@@ -9,13 +9,13 @@ async function choose(id){active=id;renderLibrary();page=1;selected.clear();rend
 let totalKnown=false,totalCache={key:'',data:null};
 function showTotal(data){
  totalKnown=true;totalPages=data.total_pages;
+ $('count-matches').hidden=true;
  $('browse-total').textContent=`of ${totalPages.toLocaleString()} pages · ${data.total.toLocaleString()} matching results`;
  $('pagination').classList.toggle('hidden',!data.total);
  $('page-label').textContent=`Page ${page} of ${totalPages.toLocaleString()}`;$('page-number').max=totalPages;
  $('next').disabled=page>=totalPages;
 }
-async function loadTotal({base,query,sid,revision,signal,superseded}){
- const key=`${sid}|${query}|${revision}`;
+async function loadTotal({base,query,key,signal,superseded}){
  let data=totalCache.key===key?totalCache.data:null;
  if(!data){
   $('browse-total').textContent='Counting matching results…';
@@ -24,22 +24,37 @@ async function loadTotal({base,query,sid,revision,signal,superseded}){
   if(superseded())return;
   totalCache={key,data};
  }
+ if(superseded())return;
  showTotal(data);
  // The page request cannot know where the results end; correct an out-of-range page once the total arrives.
  if(data.total&&page>data.total_pages){page=data.total_pages;$('page-number').value=page;loadPosts().catch(e=>toast(e.message,true))}
 }
 async function loadPosts({scrollTop=false}={}){
  if(active===null)return;
- const requestId=++postsRequest,sid=active,size=perPage,term=$('filter').value,sort=resultSort;
+ const requestId=++postsRequest,sid=active,size=perPage,filterValue=$('filter').value,sort=resultSort;
+ const term=filterValue.trim();
  postsController?.abort();
  const controller=postsController=new AbortController();
  const revision=browseRevision();
- const superseded=()=>requestId!==postsRequest||sid!==active||size!==perPage||sort!==resultSort||term!==$('filter').value||!hasSearch(sid);
+ const superseded=()=>requestId!==postsRequest||sid!==active||size!==perPage||sort!==resultSort||filterValue!==$('filter').value||!hasSearch(sid);
  const base=activePath(sid)+'/posts',query=`per_page=${size}&filter=${encodeURIComponent(term)}`;
  let offset=0,failed=false;
  const loaded=new Map();pageLoading=true;$('page-loading').textContent='Loading results…';setBusyControls();
  totalKnown=false;
- loadTotal({base,query,sid,revision,signal:controller.signal,superseded}).catch(()=>{});
+ $('browse-total').textContent='';
+ $('page-number').max='';
+ const countButton=$('count-matches');
+ countButton.hidden=true;countButton.disabled=false;
+ const totalKey=[sid,query,revision].join('|');
+ const fetchTotal=()=>loadTotal({base,query,key:totalKey,signal:controller.signal,superseded});
+ countButton.onclick=async()=>{
+  if(superseded())return;
+  countButton.disabled=true;
+  try{await fetchTotal()}finally{if(!superseded())countButton.disabled=false}
+ };
+ const tagFilter=term&&!/^(id|job):/i.test(term);
+ const cachedTotal=totalCache.key===totalKey;
+ if(!tagFilter)fetchTotal().catch(()=>{});
  try{
   do{
    const data=await api(`${base}/page?page=${page}&${query}&sort=${encodeURIComponent(sort)}&chunk_size=${term?size:Math.min(size,48)}&chunk_offset=${offset}`,undefined,{signal:controller.signal});
@@ -48,6 +63,10 @@ async function loadPosts({scrollTop=false}={}){
    for(const post of data.posts)loaded.set(post.record_id,post);
    current=[...loaded.values()];for(const post of current)if(post.queued||post.downloaded)selected.delete(post.record_id);
    renderPosts();
+   if(tagFilter&&offset===0){
+    if(cachedTotal)fetchTotal().catch(()=>{});
+    else countButton.hidden=false;
+   }
    $('page-number').value=page;$('previous').disabled=page<=1;
    if(totalKnown)showTotal(totalCache.data);
    else{$('page-label').textContent=`Page ${page}`;$('next').disabled=!data.has_next&&!data.more_on_page;if(current.length||page>1)$('pagination').classList.remove('hidden')}

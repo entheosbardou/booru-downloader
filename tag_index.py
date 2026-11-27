@@ -1,7 +1,9 @@
 """Resumable background indexing and literal substring search of saved tags."""
 import hashlib
 import re
+import threading
 import time
+from collections import OrderedDict
 
 SETTING = 'saved_tag_index_v1'
 # Bounds that keep every planning probe cheap regardless of library size.
@@ -13,6 +15,36 @@ MAX_ANCHORS = 3             # filter words used to narrow candidates
 # literal phrase against the stored tag text, because word order and adjacency matter there.
 VERIFY_SINGLE_WORD = False
 _GRAM_HITS = {}
+_TERM_CACHE = OrderedDict()
+_TERM_CACHE_LOCK = threading.Lock()
+TERM_CACHE_SIZE = 64
+PLAN_LIMIT_MS = 7000
+
+
+class PlanningTimeout(Exception):
+    pass
+
+
+class PlanningReads:
+    """Share a deadline across the read-only statements used to choose a plan."""
+
+    def __init__(self, db):
+        self.db = db
+        self.deadline = time.monotonic() + PLAN_LIMIT_MS / 1000
+
+    def execute(self, sql, params=()):
+        from pymysql.err import OperationalError
+
+        remaining = int((self.deadline - time.monotonic()) * 1000)
+        if remaining <= 0:
+            raise PlanningTimeout
+        sql = sql.replace('SELECT ', f'SELECT /*+ MAX_EXECUTION_TIME({remaining}) */ ', 1)
+        try:
+            return self.db.execute(sql, params)
+        except OperationalError as exc:
+            if exc.args[0] == 3024:
+                raise PlanningTimeout from exc
+            raise
 
 
 def status(db):
@@ -122,7 +154,7 @@ def posting_count(db, term_ids, cap):
                       ','.join('?' for _ in term_ids)+') LIMIT '+str(int(cap)+1)+') AS bounded', term_ids).fetchone()[0]
 
 
-def filter_query(db, search_ids, text):
+def filter_query(db, search_ids, text, *, scoped_page=None):
     """Rows of result_order matching the filter, planned so no step scales with the whole library.
 
     Resolve each filter word to the tag ids containing it, then walk whichever is smaller: the tag's
@@ -132,23 +164,41 @@ def filter_query(db, search_ids, text):
     text = text.casefold()
     tokens = re.findall(r'\S+', text)
     slots = ','.join('?' for _ in search_ids)
-    direct = ('SELECT ro.* FROM result_order ro JOIN post_tag_text txt ON txt.post_id=ro.post_id '
-              'WHERE ro.search_id IN ('+slots+') AND instr(txt.tags,?)>0', [*search_ids, text])
+
+    def scoped(join, predicate, args):
+        if scoped_page is not None:
+            page = scoped_page(join, predicate, args)
+            if page is not None:
+                return page
+        return ('SELECT ro.* FROM result_order ro'+join+' WHERE ro.search_id IN ('+slots+')'+predicate,
+                [*search_ids, *args])
+
+    def direct():
+        return scoped(' JOIN post_tag_text txt ON txt.post_id=ro.post_id', ' AND instr(txt.tags,?)>0', [text])
+
     words = sorted({t for t in tokens if len(t) >= 3}, key=lambda t: (-len(t), t))[:MAX_ANCHORS]
     if not words:
-        return direct
-    scope = scope_size(db, search_ids) or POSTING_CAP   # unknown size: assume large rather than empty
-    cap = min(scope, POSTING_CAP)
-    groups = []
+        return direct()
+    mysql = getattr(db, 'is_mysql', False)
+    planner = PlanningReads(db) if mysql else db
+    revision = status(planner).get('updated') if mysql else None
+    terms = []
     for word in words:
-        ids = matching_term_ids(db, word)
-        if ids is None:          # too common to narrow with; the text check still applies
+        ids = cached_term_ids(planner, word, revision)
+        if ids is None:              # too common to narrow with; the text check still applies
             continue
-        if not ids:              # no tag contains this word, so nothing can match
+        if not ids:                  # no tag contains this word, so nothing can match
             return 'SELECT * FROM result_order WHERE 1=0', []
-        groups.append((posting_count(db, ids, cap), ids))
-    if not groups:
-        return direct
+        terms.append(ids)
+    if not terms:
+        return direct()
+    cap = POSTING_CAP
+    try:
+        cap = min(scope_size(planner, search_ids) or POSTING_CAP, POSTING_CAP)
+        groups = [(posting_count(planner, ids, cap), ids) for ids in terms]
+    except PlanningTimeout:
+        # A posting count only affects which route we take, so probe the collection instead.
+        groups = [(cap+1, ids) for ids in terms]
     groups.sort(key=lambda group: group[0])
     verify = len(tokens) > 1 or VERIFY_SINGLE_WORD
     text_join = ' JOIN post_tag_text txt ON txt.post_id=ro.post_id' if verify else ''
@@ -157,12 +207,14 @@ def filter_query(db, search_ids, text):
     rarest_count, rarest_ids = groups[0]
 
     def has_tag(group_list):
-        # A scalar subquery is evaluated once per candidate row through the (post_id, tag_id) primary key.
-        # Unlike EXISTS it cannot be flattened into a join that would drive from a huge tag posting list.
+        # A scalar probe can stop at the first matching tag and stays on the post's postings in MySQL.
         sql, args = '', []
         for number, (_, ids) in enumerate(group_list):
-            sql += (' AND (SELECT count(*) FROM post_tags px%d WHERE px%d.post_id=ro.post_id AND px%d.tag_id IN (%s))>0'
-                    % (number, number, number, ','.join('?' for _ in ids)))
+            alias = f'px{number}'
+            index = ' FORCE INDEX (PRIMARY)' if mysql else ''
+            slots = ','.join('?' for _ in ids)
+            sql += (f' AND (SELECT 1 FROM post_tags {alias}{index} WHERE {alias}.post_id=ro.post_id'
+                    f' AND {alias}.tag_id IN ({slots}) LIMIT 1)=1')
             args += ids
         return sql, args
 
@@ -177,8 +229,23 @@ def filter_query(db, search_ids, text):
         return sql, [*rarest_ids, *search_ids, *extra_args, *text_args]
     # Every filter word is more common than the collection is large: check the collection's own posts.
     extra_sql, extra_args = has_tag(groups)
-    sql = ('SELECT ro.* FROM result_order ro'+text_join+' WHERE ro.search_id IN ('+slots+')'+extra_sql+text_test)
-    return sql, [*search_ids, *extra_args, *text_args]
+    return scoped(text_join, extra_sql+text_test, [*extra_args, *text_args])
+
+
+def cached_term_ids(db, word, revision):
+    if revision is None:
+        return matching_term_ids(db, word)
+    key = (revision, word)
+    with _TERM_CACHE_LOCK:
+        if key in _TERM_CACHE:
+            _TERM_CACHE.move_to_end(key)
+            return _TERM_CACHE[key]
+    ids = matching_term_ids(db, word)
+    with _TERM_CACHE_LOCK:
+        _TERM_CACHE[key] = ids
+        if len(_TERM_CACHE) > TERM_CACHE_SIZE:
+            _TERM_CACHE.popitem(last=False)
+    return ids
 
 
 def gram_hits(db, gram):
@@ -198,7 +265,9 @@ def matching_term_ids(db, anchor):
     positions = [anchor[i:i+3] for i in range(len(anchor)-2)]
     if len(positions) > 8:
         positions = [positions[i*(len(positions)-1)//7] for i in range(8)]
-    ranked = sorted(set(positions), key=lambda gram: gram_hits(db, gram))[:3]
+    distinct = sorted(set(positions))
+    # If every distinct gram fits in the join, MySQL can choose their order without extra probes.
+    ranked = distinct if len(distinct) <= 3 else sorted(distinct, key=lambda gram: gram_hits(db, gram))[:3]
     # Every trigram of the anchor must occur in a matching term. Probe the extra trigrams by primary key
     # so only terms containing all of them reach the substring check.
     joins = ''.join(' JOIN tag_grams g%d ON g%d.tag_id=g0.tag_id AND g%d.gram=?' % (i,i,i) for i in range(1,len(ranked)))

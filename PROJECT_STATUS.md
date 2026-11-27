@@ -1,5 +1,12 @@
 # Project status
 
+## Saved-tag search and MySQL storage investigation (November 27, 2026)
+
+- The results grid loads before any exact tag count. Use **Count matches** for an exact total. Previous and Next work from the page itself, and the UI reuses a fetched total for the same filter and library revision. Unfiltered totals and ID or job lookups still count automatically.
+- The first few pages of common filters and short substrings can use the existing sort indexes to stop after enough matches from each site. Rare tags still use posting lists. The tag planner caches substring expansions by index revision and shares a seven-second MySQL limit across planning reads. A timed-out posting estimate switches to collection-side checks with the same tag IDs. A timed-out tag expansion returns a retryable error. No schema change is required.
+- Python compilation, 29 unit tests, JavaScript syntax and behavior checks, Compose validation, and a clean build passed. Against an isolated MySQL 8.0.46 instance initialized from the repository schema, 108 page requests and six exact counts matched the expected results across all six sorts. MySQL enforced the planning time limit. The image on linux-docker is booru-downloader:saved-tag-search (sha256:05c0273bf6e2a7cf0ac0e2fc38e54a05b15a48ea1680acc006eccf12cda6193e). Production still runs revision 848d661, and the new release's live performance remains unverified.
+- ESXi places the MySQL VM's disk on the Thelinclan datastore, which is backed by a shared Seagate ST4000DM004 hard drive. One esxtop sample showed 272 ms of device latency and 17 ms of ESXi kernel latency per command. MySQL has a 2 GiB InnoDB buffer pool and the guest had about 10.6 GiB of available memory during inspection. Storage and MySQL settings were unchanged.
+
 ## Saved-result search on large collections (November 26, 2026)
 
 - Symptom: filtered searches in collections of about 1,000 posts or more time out (roughly 120 seconds at first, about 30 seconds after the page and total were split into separate requests), and other requests then time out too.
