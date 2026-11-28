@@ -1,5 +1,11 @@
 # Project status
 
+## Bulk post removal (November 28, 2026)
+
+- **Remove selected** supports saved, queued, and undownloaded posts. Before deletion, it finds posts across saved collections linked through shared file records and shows the number of additional posts in the confirmation. The confirmed set uses the existing Skip post operation to remove saved results, cancel pending downloads, and delete downloaded files once the last post link is removed. The confirmation covers the file links found when the selection is resolved.
+- Python compilation, 31 unit tests, JavaScript syntax and behavior checks, and Compose validation passed. An isolated MySQL 8.0.46 fixture verified file deletion across linked posts in two collections, preserved unrelated files and posts, and verified job cleanup, result counts, repeat removal, and single-post Skip behavior.
+- The clean image build on `linux-docker` is `booru-downloader:remove-selected` (`sha256:c0f483a324fb68c1ab24d02d2a08a5a24a181a83298f40f745fa05269632ae1b`). Production deployment is pending. No schema change is required.
+
 ## Saved-tag first-page timeouts (November 27, 2026)
 
 - Production revision 9fc9824 was verified after the automatic count rollout. First-card reports were about 55 seconds for collection 99 (28,037 saved posts) and 7 minutes 50 seconds for collection 73 (430,276 saved posts). Production logs for collection 73 showed repeated MySQL page-query timeouts about 24 seconds apart. The library refresh retried the same failed view every time it refreshed.
