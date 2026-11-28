@@ -56,7 +56,7 @@ async function loadPosts({scrollTop=false}={}){
    if(superseded())return;
    renderKey=revision;
    for(const post of data.posts)loaded.set(post.record_id,post);
-   current=[...loaded.values()];for(const post of current)if(post.queued||post.downloaded)selected.delete(post.record_id);
+   current=[...loaded.values()];
    renderPosts();
    $('page-number').value=page;$('previous').disabled=page<=1;
    if(totalKnown)showTotal(totalCache.data);
@@ -73,4 +73,4 @@ async function loadPosts({scrollTop=false}={}){
 }
 
 
-async function refreshVisiblePostStatus(){if(active===null||!current.length)return;const sid=active,requestId=postsRequest;const data=await api(`${activePath(sid)}/posts/status`,{ids:current.map(p=>p.record_id)});if(sid!==active||requestId!==postsRequest)return;const statuses=new Map(data.posts.map(p=>[p.record_id,p]));for(const post of current){post.status_pending=false;const status=statuses.get(post.record_id);if(status){post.downloaded=status.downloaded;post.queued=status.queued;if(post.queued||post.downloaded)selected.delete(post.record_id)}}renderPosts();setBusyControls()}
+async function refreshVisiblePostStatus(){if(active===null||!current.length)return;const sid=active,requestId=postsRequest;const data=await api(`${activePath(sid)}/posts/status`,{ids:current.map(p=>p.record_id)});if(sid!==active||requestId!==postsRequest)return;const statuses=new Map(data.posts.map(p=>[p.record_id,p]));for(const post of current){post.status_pending=false;const status=statuses.get(post.record_id);if(status){post.downloaded=status.downloaded;post.queued=status.queued}}renderPosts();setBusyControls()}

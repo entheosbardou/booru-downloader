@@ -14,6 +14,7 @@ from email.utils import parsedate_to_datetime
 from urllib.error import HTTPError
 from contextlib import contextmanager
 from pathlib import Path
+from itertools import batched
 from urllib.parse import urlparse, urlunparse, parse_qs
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
@@ -868,6 +869,13 @@ def remove_skipped_post_files(db, record_id):
 
 @app.post('/api/posts/<int:record_id>/skip')
 def skip_post(record_id):
+    result = skip_saved_post(record_id)
+    if result is None:
+        abort(404)
+    return jsonify(result)
+
+
+def skip_saved_post(record_id):
     lock = file_lock('shared-download-'+str(record_id))
     if lock.locked():
         with database() as db:
@@ -877,7 +885,7 @@ def skip_post(record_id):
     with lock, database() as db:
         post = db.execute('SELECT availability_status FROM posts WHERE id=? FOR UPDATE',(record_id,)).fetchone()
         if not post:
-            abort(404)
+            return None
         already_skipped = post['availability_status'] in ('empty_redirect','skipped')
         if not already_skipped:
             db.execute("UPDATE posts SET availability_status='skipped' WHERE id=?",(record_id,))
@@ -892,9 +900,67 @@ def skip_post(record_id):
           WHERE kind='download' AND download_post_id=? AND status='running'""",(record_id,)).rowcount
         deleted_files, shared_files = remove_skipped_post_files(db, record_id)
     WAKE.set()
-    return jsonify(skipped=True,already_skipped=already_skipped,
-                   removed_results=sum(row['total'] for row in linked),cleared_downloads=cleared,
-                   stopping_downloads=stopping,deleted_files=deleted_files,shared_files=shared_files)
+    return dict(skipped=True,already_skipped=already_skipped,
+                removed_results=sum(row['total'] for row in linked),cleared_downloads=cleared,
+                stopping_downloads=stopping,deleted_files=deleted_files,shared_files=shared_files)
+
+
+def selected_post_ids():
+    body = request.get_json(silent=True)
+    ids = body.get('ids') if isinstance(body, dict) else None
+    if (not isinstance(ids, list) or not 1 <= len(ids) <= 20
+            or any(type(record_id) is not int or record_id <= 0 for record_id in ids)):
+        raise ValueError('Select between 1 and 20 valid post IDs per request.')
+    return list(dict.fromkeys(ids))
+
+
+@app.post('/api/posts/removal-targets')
+def removal_targets():
+    pending_posts = set(selected_post_ids())
+    posts = pending_posts.copy()
+    files = set()
+    with database() as db:
+        while pending_posts:
+            linked_files = set()
+            for batch in batched(pending_posts, 500):
+                marks = ','.join(['%s'] * len(batch))
+                rows = db.raw_execute(f"""
+                    SELECT DISTINCT mf.file_id FROM post_media pm
+                    JOIN media_files mf ON mf.media_id=pm.id WHERE pm.post_id IN ({marks})
+                """, batch).fetchall()
+                linked_files.update(file_id for (file_id,) in rows)
+            new_files = linked_files - files
+            files.update(new_files)
+
+            linked_posts = set()
+            for batch in batched(new_files, 500):
+                marks = ','.join(['%s'] * len(batch))
+                rows = db.raw_execute(f"""
+                    SELECT DISTINCT pm.post_id FROM media_files mf
+                    JOIN post_media pm ON pm.id=mf.media_id WHERE mf.file_id IN ({marks})
+                """, batch).fetchall()
+                linked_posts.update(post_id for (post_id,) in rows)
+            pending_posts = linked_posts - posts
+            posts.update(pending_posts)
+    return jsonify(ids=sorted(posts))
+
+
+@app.post('/api/posts/remove-selected')
+def remove_selected_posts():
+    ids = selected_post_ids()
+    removed = []
+    deleted_files = 0
+    for record_id in ids:
+        try:
+            result = skip_saved_post(record_id)
+        except (OperationalError, OSError, ValueError):
+            app.logger.warning('Bulk removal interrupted at post %s', record_id)
+            return jsonify(removed=removed, deleted_files=deleted_files,
+                           error='Could not finish skipping a post. Please retry the remaining posts.')
+        removed.append(record_id)
+        if result is not None:
+            deleted_files += result['deleted_files']
+    return jsonify(removed=removed, deleted_files=deleted_files)
 
 
 @app.post('/api/jobs/restart-stopped')
