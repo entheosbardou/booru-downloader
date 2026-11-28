@@ -9,7 +9,6 @@ async function choose(id){active=id;renderLibrary();page=1;selected.clear();rend
 let totalKnown=false,totalCache={key:'',data:null};
 function showTotal(data){
  totalKnown=true;totalPages=data.total_pages;
- $('count-matches').hidden=true;
  $('browse-total').textContent=`of ${totalPages.toLocaleString()} pages · ${data.total.toLocaleString()} matching results`;
  $('pagination').classList.toggle('hidden',!data.total);
  $('page-label').textContent=`Page ${page} of ${totalPages.toLocaleString()}`;$('page-number').max=totalPages;
@@ -43,17 +42,9 @@ async function loadPosts({scrollTop=false}={}){
  totalKnown=false;
  $('browse-total').textContent='';
  $('page-number').max='';
- const countButton=$('count-matches');
- countButton.hidden=true;countButton.disabled=false;
  const totalKey=[sid,query,revision].join('|');
  const fetchTotal=()=>loadTotal({base,query,key:totalKey,signal:controller.signal,superseded});
- countButton.onclick=async()=>{
-  if(superseded())return;
-  countButton.disabled=true;
-  try{await fetchTotal()}finally{if(!superseded())countButton.disabled=false}
- };
  const tagFilter=term&&!/^(id|job):/i.test(term);
- const cachedTotal=totalCache.key===totalKey;
  if(!tagFilter)fetchTotal().catch(()=>{});
  try{
   do{
@@ -63,16 +54,14 @@ async function loadPosts({scrollTop=false}={}){
    for(const post of data.posts)loaded.set(post.record_id,post);
    current=[...loaded.values()];for(const post of current)if(post.queued||post.downloaded)selected.delete(post.record_id);
    renderPosts();
-   if(tagFilter&&offset===0){
-    if(cachedTotal)fetchTotal().catch(()=>{});
-    else countButton.hidden=false;
-   }
    $('page-number').value=page;$('previous').disabled=page<=1;
    if(totalKnown)showTotal(totalCache.data);
    else{$('page-label').textContent=`Page ${page}`;$('next').disabled=!data.has_next&&!data.more_on_page;if(current.length||page>1)$('pagination').classList.remove('hidden')}
    $('page-loading').textContent=data.more_on_page?`Loading results… ${current.length}`:'';
    setBusyControls();if(scrollTop&&offset===0)window.scrollTo({top:0,behavior:'smooth'});
    refreshVisiblePostStatus().catch(()=>{});
+   // Give the page query priority over the more expensive exact tag count.
+   if(tagFilter&&offset===0)fetchTotal().catch(()=>{});
    offset+=data.posts.length;if(!data.more_on_page||!data.posts.length)break;
   }while(offset<size);
  }catch(e){if(controller.signal.aborted)return;failed=true;if(requestId===postsRequest)$('page-loading').textContent='Loading interrupted · use Go to retry.';throw e}

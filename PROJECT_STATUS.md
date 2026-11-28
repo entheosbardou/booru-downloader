@@ -1,10 +1,16 @@
 # Project status
 
+## Automatic saved-tag counts after rendering (November 27, 2026)
+
+- Saved-tag results render before the browser requests the exact count. The count starts automatically and updates the page total when it finishes. Previous and Next work from the page response while the count is pending. The Count matches button has been removed.
+- Python compilation, 29 unit tests, JavaScript syntax and behavior checks, Compose validation, and a clean Docker build passed. The browser behavior test holds the count open and verifies the results and Next button are usable while it is pending. The image on linux-docker is booru-downloader:saved-tag-auto-count (sha256:58eeb63e8535e5f9181da4d5e2d96a621fe2d428d1a142a77fe80708b132df0c).
+- Production was verified on revision 61a1ef2 (sha256:5c7c3c1027347a4abc9fea9cd85a1c7a5bd9c82cd29c6b7dc3da977e68c79558), which still contains the Count matches button. Deployment of the automatic count change is pending.
+
 ## Saved-tag search and MySQL storage investigation (November 27, 2026)
 
-- The results grid loads before any exact tag count. Use **Count matches** for an exact total. Previous and Next work from the page itself, and the UI reuses a fetched total for the same filter and library revision. Unfiltered totals and ID or job lookups still count automatically.
+- This revision introduced a separate Count matches button. Previous and Next work from the page itself, and the UI reuses a fetched total for the same filter and library revision. Unfiltered totals and ID or job lookups count automatically.
 - The first few pages of common filters and short substrings can use the existing sort indexes to stop after enough matches from each site. Rare tags still use posting lists. The tag planner caches substring expansions by index revision and shares a seven-second MySQL limit across planning reads. A timed-out posting estimate switches to collection-side checks with the same tag IDs. A timed-out tag expansion returns a retryable error. No schema change is required.
-- Python compilation, 29 unit tests, JavaScript syntax and behavior checks, Compose validation, and a clean build passed. Against an isolated MySQL 8.0.46 instance initialized from the repository schema, 108 page requests and six exact counts matched the expected results across all six sorts. MySQL enforced the planning time limit. The image on linux-docker is booru-downloader:saved-tag-search (sha256:05c0273bf6e2a7cf0ac0e2fc38e54a05b15a48ea1680acc006eccf12cda6193e). Production still runs revision 848d661, and the new release's live performance remains unverified.
+- Python compilation, 29 unit tests, JavaScript syntax and behavior checks, Compose validation, and a clean build passed. Against an isolated MySQL 8.0.46 instance initialized from the repository schema, 108 page requests and six exact counts matched the expected results across all six sorts. MySQL enforced the planning time limit. The initial build was booru-downloader:saved-tag-search (sha256:05c0273bf6e2a7cf0ac0e2fc38e54a05b15a48ea1680acc006eccf12cda6193e). Revision 61a1ef2 was subsequently verified running in production. The release's live performance remains unverified.
 - ESXi places the MySQL VM's disk on the Thelinclan datastore, which is backed by a shared Seagate ST4000DM004 hard drive. One esxtop sample showed 272 ms of device latency and 17 ms of ESXi kernel latency per command. MySQL has a 2 GiB InnoDB buffer pool and the guest had about 10.6 GiB of available memory during inspection. Storage and MySQL settings were unchanged.
 
 ## Saved-result search on large collections (November 26, 2026)

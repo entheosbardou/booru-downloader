@@ -93,31 +93,41 @@ async function testSectionsLoadIndependently(){
  assert.equal(rt.context.current[0].record_id,7);
  assert.match(rt.nodes.get('browse-total').textContent,/1 matching results/);
 }
-async function testTagCountOnDemand(){
+async function testTagCountAfterRender(){
  const calls=[];
+ let resolvePage,resolveCount;
  const rt=browseRuntime(url=>{
   calls.push(url);
-  if(url.includes('/posts/count'))return Promise.resolve({total:49,total_pages:2,per_page:48});
+  if(url.includes('/posts/count')){
+   assert.equal(rt.context.current[0]?.record_id,7,'cards must be rendered before counting');
+   assert.ok(calls.includes('render'));
+   return new Promise(resolve=>{resolveCount=resolve});
+  }
   if(url.includes('/posts/status'))return Promise.resolve({posts:[]});
-  return Promise.resolve({posts:[{record_id:7}],more_on_page:false,has_next:true});
+  return new Promise(resolve=>{resolvePage=resolve});
  });
+ rt.context.renderPosts=()=>calls.push('render');
  rt.run("$('filter').value='blue_hair'");
- await rt.run('loadPosts()');
- const button=rt.nodes.get('count-matches');
- assert.equal(button.hidden,false);
+ const pageData={posts:[{record_id:7}],more_on_page:false,has_next:true};
+ const first=rt.run('loadPosts()');
  assert.equal(calls.filter(url=>url.includes('/posts/count')).length,0);
+ resolvePage(pageData);
+ await first;
+ assert.equal(calls.filter(url=>url.includes('/posts/count')).length,1);
+ assert.equal(rt.nodes.get('browse-total').textContent,'Counting matching results…');
  assert.equal(rt.nodes.get('next').disabled,false);
- await button.onclick();
- assert.equal(button.hidden,true);
+ resolveCount({total:49,total_pages:2,per_page:48});
+ await flush();
  assert.match(rt.nodes.get('browse-total').textContent,/49 matching results/);
  rt.context.page=2;
- await rt.run('loadPosts()');
- await flush();
+ const second=rt.run('loadPosts()');
+ resolvePage(pageData);
+ await second;
  assert.equal(calls.filter(url=>url.includes('/posts/count')).length,1);
  assert.equal(rt.nodes.get('next').disabled,true);
 }
 (async()=>{
  await testCooldown();await testDetachedImage();await testRequestBodyTimeout();await testStalePageCancellation();await testSectionsLoadIndependently();
- await testTagCountOnDemand();
- console.log('PASS: preview cooldown isolation, detached cancellation, body timeout, stale page cancellation, independent loading, and on-demand tag counts');
+ await testTagCountAfterRender();
+ console.log('PASS: preview cooldown isolation, detached cancellation, body timeout, stale page cancellation, independent loading, and automatic tag counts after rendering');
 })().catch(error=>{console.error(error);process.exitCode=1});
