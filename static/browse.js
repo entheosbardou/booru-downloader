@@ -1,7 +1,10 @@
 // Saved-result navigation owns its in-flight requests independently of Activity.
-let postsController=null,libraryLoaded=false,failedBrowseSelection=null;
+let postsController=null,totalRequestSignal=null,libraryLoaded=false,failedBrowseSelection=null;
 function browseSelection(){return JSON.stringify([active,page,perPage,resultSort,$('filter').value])}
-function shouldRefreshPosts(){return !pageLoading&&browseRevision()!==renderKey&&browseSelection()!==failedBrowseSelection}
+function shouldRefreshPosts(){
+ return active!==null&&!pageLoading&&totalRequestSignal!==postsController?.signal
+  &&browseRevision()!==renderKey&&browseSelection()!==failedBrowseSelection;
+}
 function browseRevision(){const found=activeSearch();return found?`${active}:${found.count}:${JSON.stringify(found.children?state.searches.filter(s=>found.children.includes(s.id)).map(s=>s.last_crawl):found.last_crawl)}:${state.settings.default_path}:${$('filter').value?Math.floor((state.tag_index?.updated||0)/30):0}`: ''}
 let refreshPending=null;
 function refresh({fresh=false}={}){if(refreshPending)return fresh?refreshPending.then(()=>refresh()):refreshPending;refreshPending=refreshLibrary().finally(()=>{refreshPending=null});return refreshPending}
@@ -19,9 +22,11 @@ function showTotal(data){
 async function loadTotal({base,query,key,signal,superseded}){
  let data=totalCache.key===key?totalCache.data:null;
  if(!data){
+  totalRequestSignal=signal;
   $('browse-total').textContent='Counting matching results…';
   try{data=await api(`${base}/count?${query}`,undefined,{signal,timeout:120000})}
   catch(e){if(signal.aborted||superseded())return;$('browse-total').textContent='Total unavailable. Results above are still usable.';return}
+  finally{if(totalRequestSignal===signal)totalRequestSignal=null}
   if(superseded())return;
   totalCache={key,data};
  }

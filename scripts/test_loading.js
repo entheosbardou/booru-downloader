@@ -46,10 +46,10 @@ async function testRequestBodyTimeout(){
  const check=assert.rejects(result,/timed out/);await flush();await rt.tick(50);await check;
 }
 function browseRuntime(handlers){
- const nodes=new Map();const node=id=>{if(!nodes.has(id))nodes.set(id,{value:'',textContent:'',disabled:false,max:0,classList:{toggle(){},remove(){}}});return nodes.get(id)};
+ const nodes=new Map();const node=id=>{if(!nodes.has(id))nodes.set(id,{value:'',textContent:'',disabled:false,max:0,classList:{contains:()=>false,toggle(){},remove(){}}});return nodes.get(id)};
  const rt=runtime({$:node,active:7,postsRequest:0,perPage:48,resultSort:'post_newest',page:1,selected:new Set(),
-  state:{settings:{}},current:[],renderKey:'',activeSearch:()=>({count:2}),activePath:id=>'/searches/'+id,
-  hasSearch:()=>true,setBusyControls(){},renderPosts(){},toast(){},api:handlers});
+  state:{settings:{}},current:[],renderKey:'',pageLoading:false,activeSearch:()=>({count:2}),activePath:id=>'/searches/'+id,
+  hasSearch:()=>true,setBusyControls(){},renderPosts(){},renderLibrary(){},renderSavedCrawlSites(){},toast(){},api:handlers});
  rt.run(source('browse.js'));rt.nodes=nodes;return rt;
 }
 async function testStalePageCancellation(){
@@ -134,7 +134,7 @@ async function testFailedPageWaitsForManualRetry(){
   if(++pageCalls===1)return Promise.reject(Error('query timed out'));
   return Promise.resolve({posts:[{record_id:7}],more_on_page:false,has_next:false});
  });
- rt.run("$('filter').value='filter'; let pageLoading=false");
+ rt.run("$('filter').value='filter'");
  await assert.rejects(rt.run('loadPosts()'),/query timed out/);
  rt.context.state.tag_index={updated:90};
  assert.equal(rt.run('shouldRefreshPosts()'),false,'library changes must not retry the failed page');
@@ -142,9 +142,41 @@ async function testFailedPageWaitsForManualRetry(){
  assert.equal(rt.context.current[0].record_id,7,'an explicit retry can recover');
  assert.equal(pageCalls,2);
 }
+async function testLibraryRefreshPreservesSearchAndCount(){
+ let pageCalls=0,countCalls=0,indexRevision=0,finishPage,finishCount,pageSignal,countSignal;
+ const rt=browseRuntime((url,body,options)=>{
+  if(url==='/library')return Promise.resolve({tag_index:{ready:true,updated:++indexRevision*30}});
+  if(url.includes('/posts/status'))return Promise.resolve({posts:[]});
+  if(url.includes('/posts/count')){
+   countCalls++;
+   countSignal=options.signal;
+   return new Promise(resolve=>{finishCount=resolve});
+  }
+  pageCalls++;
+  pageSignal=options.signal;
+  return new Promise(resolve=>{finishPage=resolve});
+ });
+ rt.run("$('filter').value='filter'");
+ const first=rt.run('loadPosts()');
+ await rt.run('refresh()');
+ assert.equal(pageCalls,1);
+ assert.equal(pageSignal.aborted,false);
+ finishPage({posts:[{record_id:7}],more_on_page:false,has_next:true});
+ await first;
+ await rt.run('refresh()');
+ assert.equal(indexRevision,2,'library metadata can refresh while results are loading');
+ assert.equal(pageCalls,1);
+ assert.equal(countCalls,1);
+ assert.equal(countSignal.aborted,false);
+ finishCount({total:49,total_pages:2});
+ await flush();
+ assert.match(rt.nodes.get('browse-total').textContent,/49 matching results/);
+ assert.equal(rt.run('shouldRefreshPosts()'),true,'the changed library can refresh after the count finishes');
+}
 (async()=>{
  await testCooldown();await testDetachedImage();await testRequestBodyTimeout();await testStalePageCancellation();await testSectionsLoadIndependently();
  await testTagCountAfterRender();
  await testFailedPageWaitsForManualRetry();
- console.log('PASS: preview handling, independent page/count loading, cancellation, and manual retry after failure');
+ await testLibraryRefreshPreservesSearchAndCount();
+ console.log('PASS: preview handling, independent page/count loading, library refresh isolation, cancellation, and manual retry after failure');
 })().catch(error=>{console.error(error);process.exitCode=1});

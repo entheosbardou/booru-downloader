@@ -1,5 +1,11 @@
 # Project status
 
+## Saved-search refresh isolation (November 28, 2026)
+
+- Library refreshes continue updating sidebar and crawl status while a saved-results page or its exact count is pending. The results grid waits for those requests to settle before reloading for a library change. Queueing a download updates the visible card status without restarting the result query. Explicit navigation can still replace the current request.
+- A JavaScript regression test advances the library revision during both requests and verifies that each original request finishes without an abort or a duplicate. Python compilation, 31 unit tests, JavaScript syntax and behavior checks, and Compose validation passed.
+- The clean build on linux-docker is booru-downloader:saved-search-refresh-isolation (sha256:a7c2b3164db4ed64f0cf7c55c76f92734e967b032d14027ddcfb11f3e5d4755f). Production remains on revision 9cc2ef1. That revision logged a MySQL statement timeout on the full filtered-page query for collection 110. The database deadline is separate from browser refresh.
+
 ## Furbooru crawl recovery (November 28, 2026)
 
 - Furbooru requests now filter for positive post IDs before applying the saved crawl cursor. Furbooru returned a zero-ID record that caused the adapter to reject an otherwise valid page.
