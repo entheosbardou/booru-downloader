@@ -304,6 +304,23 @@ class BrowseFilterTests(BrowseTests):
             result=self.endpoint('/page',filter='blue_hair')
         self.assertEqual([p['record_id'] for p in result['posts']],[2,1])
 
+    def test_ordered_prefix_can_fill_a_page_without_the_full_filter(self):
+        for _ in self.each_route():
+            with patch.object(self.module,'fetch_page',wraps=self.module.fetch_page) as fetch:
+                result=self.endpoint('/page',filter='blue_hair',per_page=1)
+            self.assertEqual(fetch.call_count,1)
+            self.assertIn('AS raw_page',fetch.call_args.kwargs['filtered_sql'])
+            self.assertEqual([p['record_id'] for p in result['posts']],[2])
+            self.assertTrue(result['has_next'])
+
+    def test_ordered_prefix_falls_back_when_its_matches_are_too_sparse(self):
+        original=self.module.fast_page_query
+        with patch.object(self.module,'fast_page_query',side_effect=lambda ids,sort,limit,offset:original(ids,sort,1,offset)):
+            for _ in self.each_route():
+                result=self.endpoint('/page',filter='blue_hair',per_page=1)
+                self.assertEqual([p['record_id'] for p in result['posts']],[2])
+                self.assertTrue(result['has_next'])
+
     def test_tag_expansion_cache_respects_index_revision(self):
         ti=self.module.tag_index
         with patch.object(ti,'_TERM_CACHE',ti.OrderedDict()), \

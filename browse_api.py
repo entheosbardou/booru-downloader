@@ -8,6 +8,7 @@ import tag_index
 SORT_FIELDS = {'post_newest':'post_sort','post_oldest':'post_sort','added_newest':'added_key','added_oldest':'added_key','score':'score','resolution':'pixels'}
 MAX_SCOPED_WINDOW = 500
 MAX_WINDOW_PARAMS = 10000
+PREFIX_LIMIT_MS = 2500
 
 
 def site_windows(ids, sort, size, join='', predicate='', args=(), *, mysql=False):
@@ -64,7 +65,7 @@ def browse_args(positive):
                 direction='ASC' if sort in ('post_oldest','added_oldest') else 'DESC')
 
 
-def build_filter(db, ids, term, *, page_sort=None, page_window=0):
+def build_filter(db, ids, term, *, scoped_page=None):
     """SQL for the result_order rows a saved-result filter keeps; (None, None, None) when unfiltered."""
     if not term:
         return None, None, None
@@ -84,18 +85,12 @@ def build_filter(db, ids, term, *, page_sort=None, page_window=0):
         if job and job['download_post_id']:
             return 'SELECT * FROM result_order WHERE search_id=? AND post_id=?', [job['search_id'],job['download_post_id']], job
         return 'SELECT * FROM result_order WHERE 1=0', [], job
-    def scoped_page(join, predicate, args):
-        if len(ids)*(len(args)+2) > MAX_WINDOW_PARAMS:
-            return None
-        return site_windows(ids, page_sort, page_window, join, predicate, args,
-                            mysql=getattr(db, 'is_mysql', False))
-
-    use_windows = page_sort is not None and 0 < page_window <= MAX_SCOPED_WINDOW
-    sql, params = tag_index.filter_query(db,ids,term,scoped_page=scoped_page if use_windows else None)
+    sql, params = tag_index.filter_query(db,ids,term,scoped_page=scoped_page)
     return sql, params, None
 
 
-def fetch_page(db, *, ids, args, filtered_sql, filtered_params, limit, offset, with_status, with_total=False):
+def fetch_page(db, *, ids, args, filtered_sql, filtered_params, limit, offset, with_status, with_total=False,
+               time_limit_ms=PAGE_LIMIT_MS):
     """One page of saved posts. Status and total are optional so callers pay only for what they show."""
     field, direction = SORT_FIELDS[args['sort']], args['direction']
     if filtered_sql is None:
@@ -106,11 +101,58 @@ def fetch_page(db, *, ids, args, filtered_sql, filtered_params, limit, offset, w
         extra_select = ',page.total_rows' if with_total else ''
         page_sql = f"SELECT post_id,search_id,added_key,{field} AS sort_value{counted} FROM ({filtered_sql}) AS filtered ORDER BY sort_value {direction},post_id {direction},added_key {direction} LIMIT ? OFFSET ?"
         page_params = [*filtered_params,limit,offset]
-    limit_hint = f'/*+ MAX_EXECUTION_TIME({PAGE_LIMIT_MS}) */ ' if filtered_sql is not None else ''
+    limit_hint = f'/*+ MAX_EXECUTION_TIME({time_limit_ms}) */ ' if filtered_sql is not None else ''
     return db.execute(f"""WITH page AS ({page_sql})
       SELECT {limit_hint}p.*,p.id AS record_id,page.search_id{extra_select}{STATUS_COLUMNS if with_status else ''}
       FROM page JOIN post_records p ON p.id=page.post_id
       ORDER BY page.sort_value {direction},page.post_id {direction},page.added_key {direction}""",page_params).fetchall()
+
+
+def fetch_results_page(db, ids, args, limit, offset):
+    sort = args['sort']
+    mysql = getattr(db, 'is_mysql', False)
+    window = limit + offset
+    prefix = None
+
+    def scoped_page(join, predicate, params):
+        nonlocal prefix
+        # Take a bounded slice of the collection in display order before checking tags.
+        # A dense match fills the page without scanning every site's less relevant rows.
+        prefix_size = min(2048, max(256, window*8))
+        raw_sql, raw_params = fast_page_query(ids, sort, prefix_size, 0)
+        field = SORT_FIELDS[sort]
+        projection = 'post_id,search_id,added_key'
+        if field != 'added_key':
+            projection += f',sort_value AS {field}'
+        prefix = (f'SELECT ro.* FROM (SELECT {projection} FROM ({raw_sql}) AS raw_page) AS ro'
+                  f'{join} WHERE 1=1{predicate}', [*raw_params, *params])
+        if len(ids)*(len(params)+2) <= MAX_WINDOW_PARAMS:
+            return site_windows(ids, sort, window, join, predicate, params, mysql=mysql)
+        return None
+
+    filtered_sql, filtered_params, job = build_filter(
+        db, ids, args['term'], scoped_page=scoped_page if window <= MAX_SCOPED_WINDOW else None)
+    read_args = dict(ids=ids,args=args,limit=limit,offset=offset,with_status=False)
+    remaining_ms = PAGE_LIMIT_MS
+    if prefix is not None:
+        prefix_sql, prefix_params = prefix
+        try:
+            rows = fetch_page(db,filtered_sql=prefix_sql,filtered_params=prefix_params,
+                              time_limit_ms=PREFIX_LIMIT_MS,**read_args)
+            # The extra row is part of the limit. A shorter prefix needs the full query
+            # to distinguish a sparse page from the true end of the results.
+            if len(rows) == limit:
+                return rows, job
+        except Exception as exc:
+            if not mysql:
+                raise
+            from pymysql.err import OperationalError
+            if not isinstance(exc, OperationalError) or exc.args[0] != 3024:
+                raise
+        remaining_ms -= PREFIX_LIMIT_MS
+    rows = fetch_page(db,filtered_sql=filtered_sql,filtered_params=filtered_params,
+                      time_limit_ms=remaining_ms,**read_args)
+    return rows, job
 
 
 def build_posts(db, rows, get_source, with_status):
@@ -140,11 +182,8 @@ def register_browse_routes(app, *, database, scoped_searches, get_source, positi
         offset = (args['page']-1)*args['per_page']+args['chunk_offset']
         with database() as db:
             ids = [row['id'] for row in scoped_searches(db,sid,gid)]
-            filtered_sql, filtered_params, lookup_job = build_filter(
-                db,ids,args['term'],page_sort=args['sort'],page_window=limit+offset+1)
             # One extra row says whether anything follows without counting the whole result set.
-            rows = fetch_page(db,ids=ids,args=args,filtered_sql=filtered_sql,filtered_params=filtered_params,
-                              limit=limit+1,offset=offset,with_status=False)
+            rows, lookup_job = fetch_results_page(db,ids,args,limit+1,offset)
             more = len(rows) > limit
             posts = build_posts(db,rows[:limit],get_source,False)
         last_chunk = args['chunk_offset']+limit >= args['per_page']

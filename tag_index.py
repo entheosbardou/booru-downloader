@@ -218,6 +218,9 @@ def filter_query(db, search_ids, text, *, scoped_page=None):
             args += ids
         return sql, args
 
+    # The same predicate can also check a small, sorted slice before using either full route.
+    extra_sql, extra_args = has_tag(groups)
+    scoped_result = scoped(text_join, extra_sql+text_test, [*extra_args, *text_args])
     if rarest_count <= cap:
         # The rarest tag has no more posts than the collection has, so read its posting list (a covering
         # index scan) and keep the posts that are in the collection.
@@ -228,8 +231,7 @@ def filter_query(db, search_ids, text, *, scoped_page=None):
                ' WHERE ro.search_id IN ('+slots+')'+extra_sql+text_test)
         return sql, [*rarest_ids, *search_ids, *extra_args, *text_args]
     # Every filter word is more common than the collection is large: check the collection's own posts.
-    extra_sql, extra_args = has_tag(groups)
-    return scoped(text_join, extra_sql+text_test, [*extra_args, *text_args])
+    return scoped_result
 
 
 def cached_term_ids(db, word, revision):

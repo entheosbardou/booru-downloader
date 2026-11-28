@@ -126,8 +126,25 @@ async function testTagCountAfterRender(){
  assert.equal(calls.filter(url=>url.includes('/posts/count')).length,1);
  assert.equal(rt.nodes.get('next').disabled,true);
 }
+async function testFailedPageWaitsForManualRetry(){
+ let pageCalls=0;
+ const rt=browseRuntime(url=>{
+  if(url.includes('/posts/count'))return Promise.resolve({total:1,total_pages:1});
+  if(url.includes('/posts/status'))return Promise.resolve({posts:[]});
+  if(++pageCalls===1)return Promise.reject(Error('query timed out'));
+  return Promise.resolve({posts:[{record_id:7}],more_on_page:false,has_next:false});
+ });
+ rt.run("$('filter').value='filter'; let pageLoading=false");
+ await assert.rejects(rt.run('loadPosts()'),/query timed out/);
+ rt.context.state.tag_index={updated:90};
+ assert.equal(rt.run('shouldRefreshPosts()'),false,'library changes must not retry the failed page');
+ await rt.run('loadPosts()');
+ assert.equal(rt.context.current[0].record_id,7,'an explicit retry can recover');
+ assert.equal(pageCalls,2);
+}
 (async()=>{
  await testCooldown();await testDetachedImage();await testRequestBodyTimeout();await testStalePageCancellation();await testSectionsLoadIndependently();
  await testTagCountAfterRender();
- console.log('PASS: preview cooldown isolation, detached cancellation, body timeout, stale page cancellation, independent loading, and automatic tag counts after rendering');
+ await testFailedPageWaitsForManualRetry();
+ console.log('PASS: preview handling, independent page/count loading, cancellation, and manual retry after failure');
 })().catch(error=>{console.error(error);process.exitCode=1});

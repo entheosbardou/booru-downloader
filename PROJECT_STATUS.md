@@ -1,10 +1,17 @@
 # Project status
 
+## Saved-tag first-page timeouts (November 27, 2026)
+
+- Production revision 9fc9824 was verified after the automatic count rollout. First-card reports were about 55 seconds for collection 99 (28,037 saved posts) and 7 minutes 50 seconds for collection 73 (430,276 saved posts). Production logs for collection 73 showed repeated MySQL page-query timeouts about 24 seconds apart. The library refresh retried the same failed view every time it refreshed.
+- Shallow tag-filtered pages now try a bounded slice in display order. They return immediately if this slice contains the page and its next-page marker. Sparse filters fall back to the full query. The browser waits for an explicit action to retry a failed view. The automatic exact count still starts after rendering, and Next advances while the count is pending.
+- Python compilation, 31 unit tests, JavaScript checks, Compose validation, and a clean Docker build passed. An isolated MySQL 8.0.46 fixture matched 108 page responses and six exact counts on 42,000 scoped posts across 21 sources. One warm, dense first-page comparison returned the same ordered rows with 468 keyed reads instead of 88,078, taking 39 ms instead of 286 ms in that fixture.
+- The build on linux-docker is booru-downloader:saved-tag-first-page (sha256:a2feb6ac92cbe073e0f4c7e2b790d3e2bef064a4873ffc7cab0004e2e23ff1a0). This fix is pending production deployment, and timings for the originally reported filters remain unverified.
+
 ## Automatic saved-tag counts after rendering (November 27, 2026)
 
 - Saved-tag results render before the browser requests the exact count. The count starts automatically and updates the page total when it finishes. Previous and Next work from the page response while the count is pending. The Count matches button has been removed.
 - Python compilation, 29 unit tests, JavaScript syntax and behavior checks, Compose validation, and a clean Docker build passed. The browser behavior test holds the count open and verifies the results and Next button are usable while it is pending. The image on linux-docker is booru-downloader:saved-tag-auto-count (sha256:58eeb63e8535e5f9181da4d5e2d96a621fe2d428d1a142a77fe80708b132df0c).
-- Production was verified on revision 61a1ef2 (sha256:5c7c3c1027347a4abc9fea9cd85a1c7a5bd9c82cd29c6b7dc3da977e68c79558), which still contains the Count matches button. Deployment of the automatic count change is pending.
+- The previous revision 61a1ef2 still contained the Count matches button. The automatic count change was subsequently verified running in production as revision 9fc9824 (sha256:4b11b17d4bfbdb7051e87a4eafcd90c957ac602c6fb99bb7630b61a0e6c75d81).
 
 ## Saved-tag search and MySQL storage investigation (November 27, 2026)
 

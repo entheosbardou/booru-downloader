@@ -158,7 +158,7 @@ $('stop-downloads').onclick=()=>action(()=>api('/jobs/stop-downloads',{}),'Downl
 try{$('previews').checked=localStorage.getItem('show-previews')!=='false'}catch{$('previews').checked=true}
 $('previews').onchange=()=>{try{localStorage.setItem('show-previews',String($('previews').checked))}catch{}renderPosts()};
 let filterTimer;$('filter').oninput=()=>{clearTimeout(filterTimer);filterTimer=setTimeout(()=>{page=1;loadPosts().catch(e=>toast(e.message,true))},350)};
-$('previous').onclick=()=>{page=Math.max(1,page-1);loadPosts({scrollTop:true}).catch(e=>toast(e.message,true))};$('next').onclick=()=>{page=Math.min(totalPages,page+1);loadPosts({scrollTop:true}).catch(e=>toast(e.message,true))};
+$('previous').onclick=()=>{page=Math.max(1,page-1);loadPosts({scrollTop:true}).catch(e=>toast(e.message,true))};$('next').onclick=()=>{page=totalKnown?Math.min(totalPages,page+1):page+1;loadPosts({scrollTop:true}).catch(e=>toast(e.message,true))};
 async function queueDownloads(ids){const result=await action(()=>api(`${activePath()}/download`,ids===undefined?{}:{ids}),r=>`${r.queued} downloads queued; ${r.linked||0} already saved posts linked.`);if(result)await loadPosts()}
 async function deleteSearch(id){const result=await action(()=>api(`${activePath(id)}/delete`,{}));if(!result)return;toast('Database purge started. Posts and file records still used by other searches are kept. Downloaded files on disk are kept.');}
 try{$('activity-details').open=localStorage.getItem('activity-expanded')==='true'}catch{}
