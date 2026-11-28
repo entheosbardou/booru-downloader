@@ -494,6 +494,9 @@ class BooruSource:
                 raise ValueError('This API needs both a username and an API key.')
             headers['Authorization'] = 'Basic ' + base64.b64encode(f'{self.username}:{self.api_key}'.encode()).decode()
         if self.api == 'philomena':
+            if urlparse(self.api_url).hostname.removeprefix('www.') == 'furbooru.org':
+                # Furbooru can include a zero-ID record at the end of a search.
+                tags = f'({tags}), id.gt:0' if tags else 'id.gt:0'
             query = f'({tags}), id.lt:{cursor}' if cursor else tags
             path = '/api/v1/json/search/images'
             params = dict(q=query, per_page=limit, page=1, sf='id', sd='desc')

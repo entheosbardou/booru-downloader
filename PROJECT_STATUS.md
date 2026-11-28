@@ -1,5 +1,11 @@
 # Project status
 
+## Furbooru crawl recovery (November 28, 2026)
+
+- Furbooru requests now filter for positive post IDs before applying the saved crawl cursor. Furbooru returned a zero-ID record that caused the adapter to reject an otherwise valid page.
+- Python compilation, 31 unit tests, JavaScript syntax, Compose validation, and a clean image build passed. A live API check using the built image recovered the four valid posts at the failed checkpoint and confirmed that the next page was empty.
+- The image on `linux-docker` is `booru-downloader:furbooru-positive-ids` (`sha256:e7be053d9407e74c8b5b2ce46a1141dfbdc1c2ea2c3004c025fa20da8fb13d48`). Production deployment and retry of job #113713 are pending.
+
 ## Bulk post removal (November 28, 2026)
 
 - **Remove selected** supports saved, queued, and undownloaded posts. Before deletion, it finds posts across saved collections linked through shared file records and shows the number of additional posts in the confirmation. The confirmed set uses the existing Skip post operation to remove saved results, cancel pending downloads, and delete downloaded files once the last post link is removed. The confirmation covers the file links found when the selection is resolved.
